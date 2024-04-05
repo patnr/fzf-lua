@@ -1,0 +1,120 @@
+*fzf-lua-opts.txt*        For Neovim >= 0.8.0       Last change: 2024 April 06
+
+==============================================================================
+Table of Contents                             *fzf-lua-opts-table-of-contents*
+
+Setup ................................................... |fzf-lua-opts-setup|
+Globals ............................................... |fzf-lua-opts-globals|
+Cmd: files ......................................... |fzf-lua-opts-cmd:-files|
+Cmd: LSP commands ........................... |fzf-lua-opts-cmd:-lsp-commands|
+
+==============================================================================
+FZF-LUA OPTIONS                                 *fzf-lua-opts-fzf-lua-options*
+
+
+
+------------------------------------------------------------------------------
+SETUP                                                     *fzf-lua-opts-setup*
+
+
+
+------------------------------------------------------------------------------
+GLOBALS                                                 *fzf-lua-opts-globals*
+
+
+
+                                                                              
+winopts.row                                         *fzf-lua-opts-winopts.row*
+
+Type: `number`, Default: `0.35`
+
+Screen row where to place the fzf-lua float window, between 0-1 will represent
+precentage of `vim.o.lines` (0: top, 1: bottom), if >= 1 will attempt to place
+the float in the exact screen line.
+
+
+                                                                              
+winopts.col                                         *fzf-lua-opts-winopts.col*
+
+Type: `number`, Default: `0.55`
+
+Screen column where to place the fzf-lua float window, between 0-1 will
+represent precentage of `vim.o.columns` (0: leftmost, 1: rightmost), if >= 1
+will attempt to place the float in the exact screen column.
+
+
+                                                                              
+winopts.preview.border                   *fzf-lua-opts-winopts.preview.border*
+
+Type: `string`, Default: `border`
+
+Applies only to fzf native previewers (i.e. `bat`, `git_status`), set to
+`noborder` to hide the preview border, consult `man fzf` for all vailable
+options.
+
+
+                                                                              
+CMD: FILES                                           *fzf-lua-opts-cmd:-files*
+
+Files picker, will enumrate the filesystem of the current working directory
+using `fd`, `rg` and `grep` or `dir.exe`.
+
+
+                                                                              
+files.cwd                                             *fzf-lua-opts-files.cwd*
+
+Type: `string`, Default: `nil`
+
+Sets the current working directory.
+
+
+                                                                              
+files.cwd_prompt                               *fzf-lua-opts-files.cwd_prompt*
+
+Type: `boolean`, Default: `true`
+
+Display the current working directory in the prompt (`fzf.vim` style).
+
+
+                                                                              
+files.cwd_prompt_shorten_len       *fzf-lua-opts-files.cwd_prompt_shorten_len*
+
+Type: `number`, Default: `32`
+
+Prompt over this length will be shortened, e.g. `~/.config/nvim/lua/` will be
+shortened to `~/.c/n/lua/` (for more info see `:help pathshorten`).
+
+<sub><sup>*Requires `cwd_prompt=true`</sup></sub>
+
+
+                                                                              
+files.cwd_prompt_shorten_val       *fzf-lua-opts-files.cwd_prompt_shorten_val*
+
+Type: `number`, Default: `1`
+
+Length of shortened prompt path parts, e.g. set to `2`, `~/.config/nvim/lua/`
+will be shortened to `~/.co/nv/lua/` (for more info see `:help pathshorten`).
+
+<sub><sup>*Requires `cwd_prompt=true`</sup></sub>
+
+
+                                                                              
+CMD: LSP COMMANDS                             *fzf-lua-opts-cmd:-lsp-commands*
+
+
+                                                                              
+lsp_references                                   *fzf-lua-opts-lsp_references*
+
+LSP references
+
+
+                                                                              
+async_or_timeout                               *fzf-lua-opts-async_or_timeout*
+
+Type: `number|boolean`, Default: `5000`
+
+Whether LSP calls are made block, set to `true` for asynchronous, otherwise
+defines the timeout (ms) for the LPS request via `vim.lsp.buf_request_sync`.
+
+
+vim:tw=78:ts=8:ft=help:norl:
