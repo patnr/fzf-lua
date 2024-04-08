@@ -1,5 +1,6 @@
 local utils = require "fzf-lua.utils"
 local libuv = require "fzf-lua.libuv"
+-- local config = require "fzf-lua.config"
 local string_sub = string.sub
 local string_byte = string.byte
 
@@ -247,6 +248,10 @@ function M.tilde_to_HOME(path)
   return path and path:gsub("^~", M.HOME()) or nil
 end
 
+-- resolve symlinks
+local abs_D = utils.lua_regex_escape(vim.fn.fnamemodify(vim.fn.resolve(M.HOME() .. "/D"), ":~"))
+local abs_P = utils.lua_regex_escape(vim.fn.fnamemodify(vim.fn.resolve(M.HOME() .. "/P"), ":~"))
+
 ---@param path string?
 ---@return string?
 function M.HOME_to_tilde(path)
@@ -259,6 +264,11 @@ function M.HOME_to_tilde(path)
   else
     path = path:gsub("^" .. utils.lua_regex_escape(M.HOME()), "~")
   end
+  -- if config.globals.file_path_manip then
+  --   path = config.globals.file_path_manip(path)
+  -- end
+  path = path:gsub(abs_P, "~/P")
+  path = path:gsub(abs_D, "~/D")
   return path
 end
 
