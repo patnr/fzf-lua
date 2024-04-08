@@ -247,6 +247,21 @@ function M.tilde_to_HOME(path)
   return path and path:gsub("^~", M.HOME()) or nil
 end
 
+-- Replace OneDrive paths with 'P' and 'D'.
+-- Doing so *here* will make it apply to multiple fzf-lua providers
+-- (either directly or indirectly through `make_entry.file`),
+-- most of which could not be o/w manipulated, since `fn_preprocess` only
+-- applies when `content` is a string (i.e. a shell command). 
+local P = "Library/CloudStorage/OneDrive-NORCE/DPhil"
+local D = "Library/CloudStorage/OneDrive-NORCE"
+-- NB: Sometimes the input paths will be relative, sometimes absolute,
+-- so don't rely on either marker (i.e. `^...` or `^~/...`).
+-- local P = vim.fn.fnamemodify(vim.fn.resolve(M.HOME() .. "/P"), ":~")
+-- local D = vim.fn.fnamemodify(vim.fn.resolve(M.HOME() .. "/D"), ":~")
+-- Escape for lua regex (e.g. `%-` instead of `-`)
+P = utils.lua_regex_escape(P)
+D = utils.lua_regex_escape(D)
+
 ---@param path string?
 ---@return string?
 function M.HOME_to_tilde(path)
@@ -259,6 +274,8 @@ function M.HOME_to_tilde(path)
   else
     path = path:gsub("^" .. utils.lua_regex_escape(M.HOME()), "~")
   end
+  path = path:gsub(P, "P")
+  path = path:gsub(D, "D")
   return path
 end
 

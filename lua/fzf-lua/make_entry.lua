@@ -306,9 +306,9 @@ M.file = function(x, opts)
         return nil
       end
     end
-    -- replace $HOME with ~
-    filepath = path.HOME_to_tilde(filepath)
   end
+  -- replace $HOME with ~
+  filepath = path.HOME_to_tilde(filepath)
   -- only check for ignored patterns after './' was
   -- stripped and path was transformed to relative
   if opts.file_ignore_patterns then
