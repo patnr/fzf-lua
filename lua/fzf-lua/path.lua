@@ -264,11 +264,14 @@ function M.HOME_to_tilde(path)
   else
     path = path:gsub("^" .. utils.lua_regex_escape(M.HOME()), "~")
   end
+  -- Replace symlinks. I don't think it can be done using `fn_transform`,
+  -- which only seems to apply to a few providers, and would probably have 
+  -- to be specified for each one.
+  path = path:gsub(abs_P, "~/P")
+  path = path:gsub(abs_D, "~/D")
   -- if config.globals.file_path_manip then
   --   path = config.globals.file_path_manip(path)
   -- end
-  path = path:gsub(abs_P, "~/P")
-  path = path:gsub(abs_D, "~/D")
   return path
 end
 
