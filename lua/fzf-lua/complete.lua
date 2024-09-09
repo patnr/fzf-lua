@@ -1,7 +1,9 @@
+local uv = vim.uv or vim.loop
 local core = require "fzf-lua.core"
 local path = require "fzf-lua.path"
 local utils = require "fzf-lua.utils"
 local config = require "fzf-lua.config"
+local libuv = require "fzf-lua.libuv"
 
 local M = {}
 
@@ -14,25 +16,25 @@ local M = {}
 local function find_toplevel_cwd(maybe_cwd, postfix, orig_cwd)
   -- expand can fail on open curly braces with:
   -- E5108: Error executing lua Vim:E220: Missing }.
-  local ok, _ = pcall(vim.fn.expand, maybe_cwd)
+  local ok, _ = pcall(libuv.expand, maybe_cwd)
   if not maybe_cwd or #maybe_cwd == 0 or not ok then
-    return nil, vim.loop.cwd(), nil
+    return nil, uv.cwd(), nil
   end
   if not orig_cwd then
     orig_cwd = maybe_cwd
   end
-  if vim.fn.isdirectory(vim.fn.expand(maybe_cwd)) == 1 then
-    local disp_cwd, cwd = maybe_cwd, vim.fn.expand(maybe_cwd)
+  if vim.fn.isdirectory(libuv.expand(maybe_cwd)) == 1 then
+    local disp_cwd, cwd = maybe_cwd, libuv.expand(maybe_cwd)
     -- returned cwd must be full path
     if path.has_cwd_prefix(cwd) then
-      cwd = vim.loop.cwd() .. (#cwd > 1 and cwd:sub(2) or "")
+      cwd = uv.cwd() .. (#cwd > 1 and cwd:sub(2) or "")
       -- inject "./" only if original path started with it
       -- otherwise ignore the "." retval from fnamemodify
       if #orig_cwd > 0 and orig_cwd:sub(1, 1) ~= "." then
         disp_cwd = nil
       end
     elseif not path.is_absolute(cwd) then
-      cwd = path.join({ vim.loop.cwd(), cwd })
+      cwd = path.join({ uv.cwd(), cwd })
     end
     return disp_cwd, cwd, postfix
   end
@@ -42,7 +44,7 @@ local function find_toplevel_cwd(maybe_cwd, postfix, orig_cwd)
 end
 
 -- forward and reverse match spaces and single/double quotes
--- and attepmpt to find the top level existing directory
+-- and attempt to find the top level existing directory
 -- set the cwd and prompt top the top level directory and
 -- the leftover match to the input query
 local set_cmp_opts_path = function(opts)
@@ -83,9 +85,9 @@ M.path = function(opts)
   if not opts then return end
   opts.cmd = opts.cmd or (function()
     if vim.fn.executable("fdfind") == 1 then
-      return "fdfind"
+      return "fdfind --strip-cwd-prefix"
     elseif vim.fn.executable("fd") == 1 then
-      return "fd"
+      return "fd --strip-cwd-prefix"
     elseif utils.__IS_WINDOWS then
       return "dir /s/b"
     else
@@ -103,9 +105,9 @@ M.file = function(opts)
   opts.cmp_is_file = true
   opts.cmd = opts.cmd or (function()
     if vim.fn.executable("fdfind") == 1 then
-      return "fdfind --type f --exclude .git"
+      return "fdfind --strip-cwd-prefix --type f --exclude .git"
     elseif vim.fn.executable("fd") == 1 then
-      return "fd --type f --exclude .git"
+      return "fd --strip-cwd-prefix --type f --exclude .git"
     elseif vim.fn.executable("rg") == 1 then
       return "rg --files"
     elseif utils.__IS_WINDOWS then

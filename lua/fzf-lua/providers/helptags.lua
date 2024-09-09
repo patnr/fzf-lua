@@ -9,11 +9,11 @@ local M = {}
 local fzf_fn = function(cb)
   local opts = {}
   opts.lang = config.globals.helptags.lang or vim.o.helplang
-  opts.fallback = utils._if(config.globals.helptags.fallback ~= nil,
-    config.globals.helptags.fallback, true)
+  opts.fallback = config.globals.helptags.fallback == nil and true
+      or config.globals.helptags.fallback
 
   local langs = vim.split(opts.lang, ",")
-  if opts.fallback and not vim.tbl_contains(langs, "en") then
+  if opts.fallback and not utils.tbl_contains(langs, "en") then
     table.insert(langs, "en")
   end
   local langs_map = {}
@@ -33,7 +33,14 @@ local fzf_fn = function(cb)
   end
 
   local help_files = {}
-  local all_files = vim.fn.globpath(vim.o.runtimepath, "doc/*", 1, 1)
+  local rtp = vim.o.runtimepath
+  -- If using lazy.nvim, get all the lazy loaded plugin paths (#1296)
+  local lazy = package.loaded["lazy.core.util"]
+  if lazy and lazy.get_unloaded_rtp then
+    local paths = lazy.get_unloaded_rtp("")
+    rtp = rtp .. "," .. table.concat(paths, ",")
+  end
+  local all_files = vim.fn.globpath(rtp, "doc/*", 1, 1)
   for _, fullpath in ipairs(all_files) do
     local file = path.tail(fullpath)
     if file == "tags" then
@@ -47,7 +54,7 @@ local fzf_fn = function(cb)
   end
 
   local hl = (function()
-    local a, b, fn = utils.ansi_from_hl("Label", "foo")
+    local _, _, fn = utils.ansi_from_hl("Label", "foo")
     return function(s) return fn(s) end
   end)()
 

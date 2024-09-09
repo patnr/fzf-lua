@@ -6,6 +6,8 @@ function _G.dump(...)
   print(unpack(objects))
 end
 
+local uv = vim.uv or vim.loop
+
 local M = {}
 
 M.__HAS_NVIM_06 = vim.fn.has("nvim-0.6") == 1
@@ -13,6 +15,7 @@ M.__HAS_NVIM_07 = vim.fn.has("nvim-0.7") == 1
 M.__HAS_NVIM_08 = vim.fn.has("nvim-0.8") == 1
 M.__HAS_NVIM_09 = vim.fn.has("nvim-0.9") == 1
 M.__HAS_NVIM_010 = vim.fn.has("nvim-0.10") == 1
+M.__HAS_NVIM_011 = vim.fn.has("nvim-0.11") == 1
 M.__IS_WINDOWS = vim.fn.has("win32") == 1 or vim.fn.has("win64") == 1
 -- `:help shellslash` (for more info see #1055)
 M.__WIN_HAS_SHELLSLASH = M.__IS_WINDOWS and vim.fn.exists("+shellslash")
@@ -52,16 +55,16 @@ end
 -- For more unicode SPACE options see:
 -- http://unicode-search.net/unicode-namesearch.pl?term=SPACE&.submit=Search
 
--- DO NOT USE '\u{}' escape, it will fail with
--- "invalid escape sequence" if Lua < 5.3
--- '\x' escape sequence requires Lua 5.2
--- M.nbsp = "\xc2\xa0"    -- "\u{00a0}"
-M.nbsp = "\xe2\x80\x82" -- "\u{2002}"
-
--- Lua 5.1 compatibility, not sure if required since we're running LuaJIT
--- but it's harmless anyways since if the '\x' escape worked it will do nothing
+-- DO NOT USE "\u{}" escape, fails with "invalid escape sequence" if Lua < 5.3
+-- "\x" escape sequence requires Lua 5.2/LuaJIT, for Lua 5.1 compatibility we
+-- use a literal backslash with the long string format `[[\x]]` to be replaced
+-- later with `string.char(tonumber(x, 16))`
 -- https://stackoverflow.com/questions/29966782/\
 --    how-to-embed-hex-values-in-a-lua-string-literal-i-e-x-equivalent
+-- M.nbsp = [[\xc2\xa0]]  -- "\u{00a0}"
+M.nbsp = [[\xe2\x80\x82]] -- "\u{2002}"
+
+-- Lua 5.1 compatibility
 if _VERSION and type(_VERSION) == "string" then
   local ver = tonumber(_VERSION:match("%d+.%d+"))
   if ver < 5.2 then
@@ -72,14 +75,6 @@ if _VERSION and type(_VERSION) == "string" then
   end
 end
 
-M._if = function(bool, a, b)
-  if bool then
-    return a
-  else
-    return b
-  end
-end
-
 M._if_win = function(a, b)
   if M.__IS_WINDOWS then
     return a
@@ -87,7 +82,6 @@ M._if_win = function(a, b)
     return b
   end
 end
-
 
 -- Substitute unix style $VAR with
 --   Style 1: %VAR%
@@ -196,19 +190,28 @@ function M.err(msg)
 end
 
 function M.is_darwin()
-  return vim.loop.os_uname().sysname == "Darwin"
+  return uv.os_uname().sysname == "Darwin"
 end
 
 ---@param str string
 ---@return string
 function M.rg_escape(str)
   if not str then return str end
-  --  [(~'"\/$?'`*&&||;[]<>)]
-  --  escape "\~$?*|[()^-."
+  -- [(~'"\/$?'`*&&||;[]<>)]
+  -- escape "\~$?*|[()^-."
   local ret = str:gsub("[\\~$?*|{\\[()^%-%.%+]", function(x)
-    return "\\" .. x
-  end)
+        return "\\" .. x
+      end)
+      -- Escape newline (#1203) at the end so we
+      -- don't end up escaping the backslash twice
+      :gsub("\n", "\\n")
   return ret
+end
+
+function M.regex_to_magic(str)
+  -- Convert regex to "very magic" pattern, basically a regex
+  -- with special meaning for "=&<>", `:help /magic`
+  return [[\v]] .. str:gsub("[=&<>]", function(x) return [[\]] .. x end)
 end
 
 function M.sk_escape(str)
@@ -229,9 +232,11 @@ function M.lua_regex_escape(str)
   -- escape all lua special chars
   -- ( ) % . + - * [ ? ^ $
   if not str then return nil end
-  return str:gsub("[%(%)%.%+%-%*%[%?%^%$%%]", function(x)
+  -- gsub returns a tuple, return the string only or unexpected happens (#1257)
+  local ret = str:gsub("[%(%)%.%+%-%*%[%?%^%$%%]", function(x)
     return "%" .. x
   end)
+  return ret
 end
 
 function M.glob_escape(str)
@@ -264,7 +269,7 @@ end
 M.file_is_binary = function(filepath)
   filepath = M.pcall_expand(filepath)
   if vim.fn.executable("file") ~= 1 or
-      not vim.loop.fs_stat(filepath) then
+      not uv.fs_stat(filepath) then
     return false
   end
   local out = M.io_system({ "file", "--dereference", "--mime", filepath })
@@ -273,9 +278,22 @@ end
 
 local S_IFMT = 0xF000  -- filetype mask
 local S_IFIFO = 0x1000 -- fifo
+local S_IFDIR = 0x4000 -- directory
 
-M.file_is_fifo = function(filepath)
-  local stat = vim.loop.fs_stat(filepath)
+M.path_is_directory = function(filepath, stat)
+  if stat == nil then
+    stat = uv.fs_stat(filepath)
+  end
+  if stat and bit.band(stat.mode, S_IFMT) == S_IFDIR then
+    return true
+  end
+  return false
+end
+
+M.file_is_fifo = function(filepath, stat)
+  if stat == nil then
+    stat = uv.fs_stat(filepath)
+  end
   if stat and bit.band(stat.mode, S_IFMT) == S_IFIFO then
     return true
   end
@@ -283,9 +301,9 @@ M.file_is_fifo = function(filepath)
 end
 
 M.file_is_readable = function(filepath)
-  local fd = vim.loop.fs_open(filepath, "r", 438)
+  local fd = uv.fs_open(filepath, "r", 438)
   if fd then
-    vim.loop.fs_close(fd)
+    uv.fs_close(fd)
     return true
   end
   return false
@@ -294,7 +312,7 @@ end
 M.perl_file_is_binary = function(filepath)
   filepath = M.pcall_expand(filepath)
   if vim.fn.executable("perl") ~= 1 or
-      not vim.loop.fs_stat(filepath) then
+      not uv.fs_stat(filepath) then
     return false
   end
   -- can also use '-T' to test for text files
@@ -304,17 +322,17 @@ M.perl_file_is_binary = function(filepath)
 end
 
 M.read_file = function(filepath)
-  local fd = vim.loop.fs_open(filepath, "r", 438)
+  local fd = uv.fs_open(filepath, "r", 438)
   if fd == nil then return "" end
-  local stat = assert(vim.loop.fs_fstat(fd))
+  local stat = assert(uv.fs_fstat(fd))
   if stat.type ~= "file" then return "" end
-  local data = assert(vim.loop.fs_read(fd, stat.size, 0))
-  assert(vim.loop.fs_close(fd))
+  local data = assert(uv.fs_read(fd, stat.size, 0))
+  assert(uv.fs_close(fd))
   return data
 end
 
 M.read_file_async = function(filepath, callback)
-  vim.loop.fs_open(filepath, "r", 438, function(err_open, fd)
+  uv.fs_open(filepath, "r", 438, function(err_open, fd)
     if err_open then
       -- we must schedule this or we get
       -- E5560: nvim_exec must not be called in a lua loop callback
@@ -323,12 +341,12 @@ M.read_file_async = function(filepath, callback)
       end)
       return
     end
-    vim.loop.fs_fstat(fd, function(err_fstat, stat)
+    uv.fs_fstat(fd, function(err_fstat, stat)
       assert(not err_fstat, err_fstat)
       if stat.type ~= "file" then return callback("") end
-      vim.loop.fs_read(fd, stat.size, 0, function(err_read, data)
+      uv.fs_read(fd, stat.size, 0, function(err_read, data)
         assert(not err_read, err_read)
-        vim.loop.fs_close(fd, function(err_close)
+        uv.fs_close(fd, function(err_close)
           assert(not err_close, err_close)
           return callback(data)
         end)
@@ -364,30 +382,60 @@ function M.tbl_deep_clone(t)
   return clone
 end
 
-function M.tbl_length(T)
+---@diagnostic disable-next-line: deprecated
+M.tbl_islist = vim.islist or vim.tbl_islist
+
+function M.tbl_isempty(T)
+  assert(type(T) == "table", string.format("Expected table, got %s", type(T)))
+  return next(T) == nil
+end
+
+function M.tbl_count(T)
   local count = 0
   for _ in pairs(T) do count = count + 1 end
   return count
 end
 
-function M.tbl_isempty(T)
-  if not T or not next(T) then return true end
-  return false
-end
-
-function M.tbl_extend(t1, t2)
+function M.tbl_join(t1, t2)
   for _, v in ipairs(t2) do
     table.insert(t1, v)
   end
   return t1
 end
 
+function M.tbl_contains(T, value)
+  for _, v in ipairs(T) do
+    if v == value then
+      return true
+    end
+  end
+  return false
+end
+
+function M.tbl_flatten(T)
+  if vim.iter then
+    return vim.iter(T):flatten(math.huge):totable()
+  else
+    ---@diagnostic disable-next-line: deprecated
+    return vim.tbl_flatten(T)
+  end
+end
+
+function M.tbl_get(T, ...)
+  local keys = { ... }
+  if #keys == 0 then
+    return nil
+  end
+  return M.map_get(T, keys)
+end
+
 -- Get map value from string key
 -- e.g. `map_get(m, "key.sub1.sub2")`
+--      `map_get(m, { "key", "sub1", "sub2" })`
 function M.map_get(m, k)
   if not m then return end
   if not k then return m end
-  local keys = M.strsplit(k, ".")
+  local keys = type(k) == "table" and k or M.strsplit(k, ".")
   local iter = m
   for i = 1, #keys do
     iter = iter[keys[i]]
@@ -401,6 +449,7 @@ end
 
 -- Set map value for string key
 -- e.g. `map_set(m, "key.sub1.sub2", value)`
+--      `map_set(m, { "key", "sub1", "sub2" }, value)`
 -- if need be, build map tree as we go along
 ---@param m table?
 ---@param k string
@@ -408,7 +457,7 @@ end
 ---@return table<string, unknown>
 function M.map_set(m, k, v)
   m = m or {}
-  local keys = M.strsplit(k, ".")
+  local keys = type(k) == "table" and k or M.strsplit(k, ".")
   local map = m
   for i = 1, #keys do
     local key = keys[i]
@@ -424,13 +473,24 @@ end
 
 ---@param m table<string, unknown>?
 ---@return table<string, unknown>?
-function M.map_tolower(m)
+function M.map_tolower(m, exclude_patterns)
+  -- We use "exclude_patterns" to filter "alt-{a|A}"
+  -- as it's a valid and different fzf bind
+  exclude_patterns = type(exclude_patterns) == "table" and exclude_patterns
+      or type(exclude_patterns) == "string" and { exclude_patterns }
+      or {}
   if not m then
     return
   end
   local ret = {}
   for k, v in pairs(m) do
-    ret[k:lower()] = v
+    local lower_k = (function()
+      for _, p in ipairs(exclude_patterns) do
+        if k:match(p) then return k end
+      end
+      return k:lower()
+    end)()
+    ret[lower_k] = v
   end
   return ret
 end
@@ -445,7 +505,7 @@ end
 ---@param m table<string, unknown>?
 ---@return table<string, unknown>?
 function M.map_flatten(m, prefix)
-  if vim.tbl_isempty(m) then return {} end
+  if M.tbl_isempty(m) then return {} end
   local ret = {}
   prefix = prefix and string.format("%s.", prefix) or ""
   for k, v in pairs(m) do
@@ -468,7 +528,7 @@ local function hex2rgb(hexcol)
   return r, g, b
 end
 
--- auto genreate ansi escape sequence from RGB or neovim highlights
+-- auto generate ansi escape sequence from RGB or neovim highlights
 --[[ M.ansi_auto = setmetatable({}, {
   -- __index metamethod only gets called when the item does not exist
   -- we use this to auto-cache the ansi escape sequence
@@ -554,7 +614,7 @@ function M.is_hl_cleared(hl)
   -- `vim.api.nvim_get_hl_by_name` is deprecated since v0.9.0
   if vim.api.nvim_get_hl then
     local ok, hl_def = pcall(vim.api.nvim_get_hl, 0, { name = hl, link = false })
-    if not ok or vim.tbl_isempty(hl_def) then
+    if not ok or M.tbl_isempty(hl_def) then
       return true
     end
   else
@@ -576,14 +636,23 @@ function M.COLORMAP()
   return M.__COLORMAP
 end
 
-local function synIDattr(hl, w)
-  return vim.fn.synIDattr(vim.fn.synIDtrans(vim.fn.hlID(hl)), w)
+local function synIDattr(hl, w, mode)
+  -- Although help specifies invalid mode returns the active hlgroups
+  -- when sending `nil` for mode the return value for "fg" is also nil
+  return mode == "cterm" or mode == "gui"
+      and vim.fn.synIDattr(vim.fn.synIDtrans(vim.fn.hlID(hl)), w, mode)
+      or vim.fn.synIDattr(vim.fn.synIDtrans(vim.fn.hlID(hl)), w)
 end
 
-function M.hexcol_from_hl(hlgroup, what)
+function M.hexcol_from_hl(hlgroup, what, mode)
   if not hlgroup or not what then return end
-  local hexcol = synIDattr(hlgroup, what)
-  if hexcol and not hexcol:match("^#") then
+  local hexcol = synIDattr(hlgroup, what, mode)
+  -- Without termguicolors hexcol returns `{ctermfg|ctermbg}` which is
+  -- a simple number representing the term ANSI color (e.g. 1-15, etc)
+  -- in which case we return the number as is so it can be passed onto
+  -- fzf's "--color" flag, this shouldn't be an issue for `ansi_from_hl`
+  -- as the function validates the a 6-digit hex number (#1422)
+  if hexcol and not hexcol:match("^#") and not tonumber(hexcol) then
     -- try to acquire the color from the map
     -- some schemes don't capitalize first letter?
     local col = M.COLORMAP()[hexcol:sub(1, 1):upper() .. hexcol:sub(2)]
@@ -605,6 +674,9 @@ function M.ansi_from_rgb(rgb, s)
   local r, g, b = hex2rgb(rgb)
   if r and g and b then
     return string.format("[38;2;%d;%d;%dm%s%s", r, g, b, s, "[0m")
+  elseif tonumber(rgb) then
+    -- No termguicolors, use the number as is
+    return string.format("[38;5;%dm%s%s", rgb, s, "[0m")
   end
   return s
 end
@@ -636,6 +708,9 @@ function M.ansi_from_hl(hl, s)
         table.insert(escseqs, string.format("[%d;2;%d;%d;%dm", p.code, r, g, b))
         -- elseif #hexcol>0 then
         --   print("unresolved", hl, w, hexcol, M.COLORMAP()[synIDattr(hl, w)])
+      elseif tonumber(hexcol) then
+        -- No termguicolors, use the number as is
+        table.insert(escseqs, string.format("[%d;5;%dm", p.code, tonumber(hexcol)))
       end
     else
       local value = synIDattr(hl, w)
@@ -664,7 +739,10 @@ function M.strip_ansi_coloring(str)
   -- 1. ^[[34m
   -- 2. ^[[0;34m
   -- 3. ^[[m
-  return str:gsub("%[[%d;]-m", "")
+  -- NOTE: didn't work with grep's "^[[K"
+  -- return str:gsub("%[[%d;]-m", "")
+  -- https://stackoverflow.com/a/49209650/368691
+  return str:gsub("[\27\155][][()#;?%d]*[A-PRZcf-ntqry=><~]", "")
 end
 
 function M.ansi_escseq_len(str)
@@ -717,7 +795,7 @@ function M.get_visual_selection()
   if cecol < cscol then cscol, cecol = cecol, cscol end
   local lines = vim.fn.getline(csrow, cerow)
   -- local n = cerow-csrow+1
-  local n = M.tbl_length(lines)
+  local n = #lines
   if n <= 0 then return "" end
   lines[n] = string.sub(lines[n], 1, cecol)
   lines[1] = string.sub(lines[1], cscol)
@@ -731,7 +809,7 @@ function M.fzf_exit()
   -- Usually called from the LSP module to exit the interface on "async" mode
   -- when no results are found or when `jump_to_single_result` is used, when
   -- the latter is used in "sync" mode we also need to make sure core.__CTX
-  -- is cleared or we'll have the wrong cursor coordiantes (#928)
+  -- is cleared or we'll have the wrong cursor coordinates (#928)
   return loadstring([[
     require('fzf-lua').core.__CTX = nil
     require('fzf-lua').win.win_leave()
@@ -741,6 +819,10 @@ end
 function M.fzf_winobj()
   -- use 'loadstring' to prevent circular require
   return loadstring("return require'fzf-lua'.win.__SELF()")()
+end
+
+function M.CTX()
+  return loadstring("return require'fzf-lua'.core.CTX()")()
 end
 
 function M.resume_get(what, opts)
@@ -771,7 +853,7 @@ function M.load_profile_fname(fname, name, silent)
   if ok and type(res) == "table" then
     -- success
     if not silent then
-      M.info(string.format("Succefully loaded profile '%s'", profile))
+      M.info(string.format("Successfully loaded profile '%s'", profile))
     end
     return res
   elseif silent then
@@ -864,7 +946,7 @@ function M.buf_is_qf(bufnr, bufinfo)
   bufinfo = bufinfo or (vim.api.nvim_buf_is_valid(bufnr) and M.getbufinfo(bufnr))
   if bufinfo and bufinfo.variables and
       bufinfo.variables.current_syntax == "qf" and
-      not vim.tbl_isempty(bufinfo.windows) then
+      not M.tbl_isempty(bufinfo.windows) then
     return M.win_is_qf(bufinfo.windows[1])
   end
   return false
@@ -915,6 +997,14 @@ function M.nvim_buf_get_name(bufnr, bufinfo)
   end
   assert(#bufname > 0)
   return bufname
+end
+
+function M.wo(win, k, v)
+  if M.__HAS_NVIM_08 then
+    vim.api.nvim_set_option_value(k, v, { scope = "local", win = win })
+  else
+    vim.wo[win][k] = v
+  end
 end
 
 function M.zz()
@@ -1044,7 +1134,7 @@ end
 -- without "E5108: Error executing lua Keyboard interrupt"
 function M.input(prompt)
   local ok, res
-  -- NOTE: do not use `vim.ui` yet, a conflcit with `dressing.nvim`
+  -- NOTE: do not use `vim.ui` yet, a conflict with `dressing.nvim`
   -- causes the return value to appear as cancellation
   -- if vim.ui then
   if false then
@@ -1115,6 +1205,39 @@ function M.windows_pipename()
   local tmpname = vim.fn.tempname()
   tmpname = string.gsub(tmpname, "\\", "")
   return ([[\\.\pipe\%s]]):format(tmpname)
+end
+
+function M.create_user_command_callback(provider, arg, altmap)
+  local function fzflua_opts(o)
+    local ret = {}
+    -- fzf.vim's bang version of the commands opens fullscreen
+    if o.bang then ret.winopts = { fullscreen = true } end
+    return ret
+  end
+  return function(o)
+    local fzf_lua = require("fzf-lua")
+    local prov = provider
+    local opts = fzflua_opts(o) -- setup bang!
+    if type(o.fargs[1]) == "string" then
+      local farg = o.fargs[1]
+      for c, p in pairs(altmap or {}) do
+        -- fzf.vim hijacks the first character of the arg
+        -- to setup special commands postfixed with `?:/`
+        -- "GFiles?", "History:" and "History/"
+        if farg:sub(1, 1) == c then
+          prov = p
+          -- we still allow using args with alt
+          -- providers by removing the "?:/" prefix
+          farg = #farg > 1 and vim.trim(farg:sub(2))
+          break
+        end
+      end
+      if arg and farg and #farg > 0 then
+        opts[arg] = vim.trim(farg)
+      end
+    end
+    fzf_lua[prov](opts)
+  end
 end
 
 return M

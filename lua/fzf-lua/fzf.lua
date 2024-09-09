@@ -56,12 +56,24 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
   -- instance never terminates which hangs fzf on exit
   local FZF_DEFAULT_COMMAND = nil
 
-  utils.tbl_extend(cmd, fzf_cli_args or {})
+  utils.tbl_join(cmd, fzf_cli_args or {})
   if type(opts.fzf_cli_args) == "table" then
-    utils.tbl_extend(cmd, opts.fzf_cli_args)
+    utils.tbl_join(cmd, opts.fzf_cli_args)
   elseif type(opts.fzf_cli_args) == "string" then
-    utils.tbl_extend(cmd, { opts.fzf_cli_args })
+    utils.tbl_join(cmd, { opts.fzf_cli_args })
   end
+
+  local function get_EOL(flag)
+    for _, f in ipairs(cmd) do
+      if f:match("%-%-" .. flag) then
+        return "\0"
+      end
+    end
+    return "\n"
+  end
+
+  local readEOL = get_EOL("read0")
+  local printEOL = get_EOL("print0")
 
   if contents then
     if type(contents) == "string" and #contents > 0 then
@@ -99,20 +111,22 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
   ---@type function|nil
   local handle_contents
 
-  if utils.__IS_WINDOWS then
-    windows_pipe_server = uv.new_pipe(false)
-    windows_pipe_server:bind(fifotmpname)
-    windows_pipe_server:listen(16, function()
-      output_pipe = uv.new_pipe(false)
-      windows_pipe_server:accept(output_pipe)
-      handle_contents()
-    end)
-  else
-    -- Create the output pipe
-    -- We use tbl for perf reasons, from ':help system':
-    --  If {cmd} is a List it runs directly (no 'shell')
-    --  If {cmd} is a String it runs in the 'shell'
-    vim.fn.system({ "mkfifo", fifotmpname })
+  if type(contents) == "function" or type(contents) == "table" then
+    if utils.__IS_WINDOWS then
+      windows_pipe_server = uv.new_pipe(false)
+      windows_pipe_server:bind(fifotmpname)
+      windows_pipe_server:listen(16, function()
+        output_pipe = uv.new_pipe(false)
+        windows_pipe_server:accept(output_pipe)
+        handle_contents()
+      end)
+    else
+      -- Create the output pipe
+      -- We use tbl for perf reasons, from ':help system':
+      --  If {cmd} is a List it runs directly (no 'shell')
+      --  If {cmd} is a String it runs in the 'shell'
+      vim.fn.system({ "mkfifo", fifotmpname })
+    end
   end
 
   local function finish(_)
@@ -162,7 +176,7 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
     if nl then
       return function(usrdata, cb)
         if not end_of_data(usrdata, cb) then
-          write_cb(tostring(usrdata) .. "\n", cb)
+          write_cb(tostring(usrdata) .. readEOL, cb)
         end
       end
     else
@@ -177,67 +191,26 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
   handle_contents = vim.schedule_wrap(function()
     -- this part runs in the background. When the user has selected, it will
     -- error out, but that doesn't matter so we just break out of the loop.
-    if contents then
-      if type(contents) == "table" then
-        if not vim.tbl_isempty(contents) then
-          write_cb(vim.tbl_map(function(x)
-            return x .. "\n"
-          end, contents))
-        end
-        finish(4)
-      else
-        contents(usr_write_cb(true), usr_write_cb(false), output_pipe)
+    if type(contents) == "table" then
+      if not utils.tbl_isempty(contents) then
+        write_cb(vim.tbl_map(function(x)
+          return x .. readEOL
+        end, contents))
       end
+      finish(4)
+    elseif type(contents) == "function" then
+      contents(usr_write_cb(true), usr_write_cb(false), output_pipe)
     end
   end)
 
-  -- I'm not sure why this happens (probably a neovim bug) but when pressing
-  -- <C-c> in quick successsion immediately after opening the window neovim
-  -- hangs the CPU at 100% at the last `coroutine.yield` before returning from
-  -- this function. At this point it seems that the fzf subprocess was started
-  -- and killed but `on_exit` is never called. In order to avoid calling `yield`
-  -- I tried checking the job/coroutine status in different ways:
-  --   * coroutine.status(co): always returns 'running'
-  --   * vim.fn.job_pid: always returns the corrent pid (even if it doesn't
-  --     exist anymore)
-  --   * vim.fn.jobwait({job_pid}, 0): always returns '-1' (even when looping
-  --     with 'vim.defer_fn(fn, 100)')
-  --   * uv.os_priority(job_pid): always returns '0'
-  -- `sudo strace -s 99 -ffp <pid> when neovim is stuck:
-  --   [pid 27433] <... epoll_wait resumed>[{events=EPOLLIN, data={u32=18, u64=18}}], 1024, -1) = 1
-  --   [pid 27432] <... write resumed>)        = 8
-  --   [pid 27433] read(18, "\1\0\0\0\0\0\0\0", 1024) = 8
-  --   [pid 27432] epoll_wait(9,  <unfinished ...>
-  --   [pid 27433] epoll_wait(15,  <unfinished ...>
-  --   [pid 27432] <... epoll_wait resumed>[], 1024, 0) = 0
-  --   [pid 27432] epoll_wait(9, [], 1024, 0)  = 0
-  --   [pid 27432] epoll_wait(9, [], 1024, 0)  = 0
-  --   [pid 27432] epoll_wait(9, [], 1024, 0)  = 0
-  --   [pid 27432] write(32, "\3", 1)          = 1
-  --   [pid 27432] write(18, "\1\0\0\0\0\0\0\0", 8 <unfinished ...>
-  --   [pid 27433] <... epoll_wait resumed>[{events=EPOLLIN, data={u32=18, u64=18}}], 1024, -1) = 1
-  --   [pid 27432] <... write resumed>)        = 8
-  --   [pid 27433] read(18, "\1\0\0\0\0\0\0\0", 1024) = 8
-  --   [pid 27432] epoll_wait(9,  <unfinished ...>
-  --   [pid 27433] epoll_wait(15,  <unfinished ...>
-  --   [pid 27432] <... epoll_wait resumed>[], 1024, 0) = 0
-  --   [pid 27432] epoll_wait(9, [], 1024, 0)  = 0
-  --   [pid 27432] epoll_wait(9, [], 1024, 0)  = 0
-  --   [pid 27432] epoll_wait(9, [], 1024, 0)  = 0
-  --   [pid 27432] write(32, "\3", 1)          = 1
-  --   [pid 27432] write(18, "\1\0\0\0\0\0\0\0", 8 <unfinished ...>
-  --
-  -- As a workaround we map buffer <C-c> to <Esc> for the fzf buffer
-  -- `vim.keymap.set` to avoid breaking compatibility with older neovim versions
-  --
-  -- Removed as an experiment since the removal of the `save_query` code
-  -- that was running on WinLeave which seems to make the `<C-c>` issue
-  -- better or even non-existent? RESTORED AGAIN
-  --
-  if vim.keymap then
-    vim.keymap.set("t", "<C-c>", "<Esc>", { buffer = 0 })
-  else
-    vim.api.nvim_buf_set_keymap(0, "t", "<C-c>", "<Esc>", { noremap = true })
+  -- https://github.com/neovim/neovim/issues/20726
+  -- https://github.com/neovim/neovim/pull/30056
+  if not utils.__HAS_NVIM_011 then
+    if vim.keymap then
+      vim.keymap.set("t", "<C-c>", "<Esc>", { buffer = 0 })
+    else
+      vim.api.nvim_buf_set_keymap(0, "t", "<C-c>", "<Esc>", { noremap = true })
+    end
   end
 
   if opts.debug then
@@ -248,10 +221,11 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
   local co = coroutine.running()
   local jobstart = opts.is_fzf_tmux and vim.fn.jobstart or vim.fn.termopen
   local shell_cmd = utils.__IS_WINDOWS
-      and { "cmd", "/d", "/e:off", "/f:off", "/v:off", "/c" }
+      -- MSYS2 comes with "/usr/bin/cmd" that precedes "cmd.exe" (#1396)
+      and { "cmd.exe", "/d", "/e:off", "/f:off", "/v:off", "/c" }
       or { "sh", "-c" }
   if utils.__IS_WINDOWS then
-    utils.tbl_extend(shell_cmd, cmd)
+    utils.tbl_join(shell_cmd, cmd)
   else
     table.insert(shell_cmd, table.concat(cmd, " "))
   end
@@ -282,15 +256,19 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
           default_opts = default_opts:gsub(utils.lua_regex_escape(p) .. "[=%s]+.-%s+%-%-", " --")
         end
         return default_opts
-      end)()
+      end)(),
+      -- Nullify user's RG config as this can cause conflicts
+      -- with fzf-lua's rg opts (#1266)
+      ["RIPGREP_CONFIG_PATH"] = type(opts.RIPGREP_CONFIG_PATH) == "string"
+          and libuv.expand(opts.RIPGREP_CONFIG_PATH) or "",
     },
     on_exit = function(_, rc, _)
       local output = {}
       local f = io.open(outputtmpname)
       if f then
-        for v in f:lines() do
-          table.insert(output, v)
-        end
+        output = vim.split(f:read("*a"), printEOL)
+        -- `file:read("*a")` appends an empty string on EOL
+        output[#output] = nil
         f:close()
       end
       finish(1)
@@ -326,11 +304,9 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
     end
   end
 
-  if not contents or type(contents) == "string" then
-    goto wait_for_fzf
-  end
-
-  if not utils.__IS_WINDOWS then
+  if not utils.__IS_WINDOWS
+      and (type(contents) == "function" or type(contents) == "table")
+  then
     -- have to open this after there is a reader (termopen)
     -- otherwise this will block
     fd = uv.fs_open(fifotmpname, "w", -1)
@@ -340,8 +316,6 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
     handle_contents()
   end
 
-
-  ::wait_for_fzf::
   return coroutine.yield()
 end
 

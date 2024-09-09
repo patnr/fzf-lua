@@ -1,10 +1,8 @@
+local uv = vim.uv or vim.loop
 local core = require "fzf-lua.core"
 local path = require "fzf-lua.path"
 local utils = require "fzf-lua.utils"
-local libuv = require "fzf-lua.libuv"
-local shell = require "fzf-lua.shell"
 local config = require "fzf-lua.config"
-local make_entry = require "fzf-lua.make_entry"
 local devicons = require "fzf-lua.devicons"
 
 local M = {}
@@ -15,7 +13,27 @@ M.commands = function(opts)
 
   local global_commands = vim.api.nvim_get_commands {}
   local buf_commands = vim.api.nvim_buf_get_commands(0, {})
-  local commands = vim.tbl_extend("force", {}, global_commands, buf_commands)
+
+  local builtin_commands = {}
+  -- parse help doc to get builtin commands and descriptions
+  if opts.include_builtin then
+    local help = vim.fn.globpath(vim.o.rtp, "doc/index.txt")
+    if uv.fs_stat(help) then
+      local cmd, desc
+      for line in utils.read_file(help):gmatch("[^\n]*\n") do
+        if line:match("^|:[^|]") then
+          if cmd then builtin_commands[cmd] = desc end
+          cmd, desc = line:match("^|:(%S+)|%s*%S+%s*(.*%S)")
+        elseif cmd then -- found
+          if line:match("^%s%+%S") then desc = desc .. (line:match("^%s*(.*%S)") or "") end
+          if line:match("^%s*$") then break end
+        end
+      end
+      if cmd then builtin_commands[cmd] = desc end
+    end
+  end
+
+  local commands = vim.tbl_extend("force", {}, global_commands, buf_commands, builtin_commands)
 
   local entries = {}
 
@@ -28,18 +46,21 @@ M.commands = function(opts)
     for i = #history, #history - 3, -1 do
       local cmd = history[i]:match("%d+%s+([^%s]+)")
       if buf_commands[cmd] then
-        table.insert(entries, utils.ansi_codes.green(cmd))
+        table.insert(entries, cmd)
         buf_commands[cmd] = nil
       end
       if global_commands[cmd] then
-        table.insert(entries, utils.ansi_codes.magenta(cmd))
+        table.insert(entries, cmd)
         global_commands[cmd] = nil
+      end
+      if builtin_commands[cmd] then
+        table.insert(entries, cmd)
       end
     end
   end
 
   for k, _ in pairs(global_commands) do
-    table.insert(entries, utils.ansi_codes.magenta(k))
+    table.insert(entries, utils.ansi_codes.blue(k))
   end
 
   for k, v in pairs(buf_commands) do
@@ -48,17 +69,22 @@ M.commands = function(opts)
     end
   end
 
+  -- Sort before adding "builtin" so they don't end up atop the list
   if not opts.sort_lastused then
     table.sort(entries, function(a, b) return a < b end)
   end
 
-  opts.preview = shell.raw_action(function(args)
+  for k, _ in pairs(builtin_commands) do
+    table.insert(entries, utils.ansi_codes.magenta(k))
+  end
+
+  opts.preview = function(args)
     local cmd = args[1]
     if commands[cmd] then
       cmd = vim.inspect(commands[cmd])
     end
     return cmd
-  end, nil, opts.debug)
+  end
 
   core.fzf_exec(entries, opts)
 end
@@ -126,6 +152,11 @@ M.jumps = function(opts)
       text))
   end
 
+  if utils.tbl_isempty(entries) then
+    utils.info(("%s list is empty."):format(opts.h1 or "jump"))
+    return
+  end
+
   table.insert(entries, 1,
     string.format("%6s %s  %s %s", opts.h1 or "jump", "line", "col", "file/text"))
 
@@ -154,14 +185,14 @@ M.tagstack = function(opts)
     end
   end
 
-  if vim.tbl_isempty(tags) then
+  if utils.tbl_isempty(tags) then
     utils.info("No tagstack available")
     return
   end
 
   local entries = {}
   for i, tag in ipairs(tags) do
-    local bufname = path.HOME_to_tilde(path.relative_to(tag.filename, vim.loop.cwd()))
+    local bufname = path.HOME_to_tilde(path.relative_to(tag.filename, uv.cwd()))
     local buficon, hl
     if opts.file_icons then
       buficon, hl = devicons.get_devicon(bufname)
@@ -192,19 +223,18 @@ M.marks = function(opts)
   opts = config.normalize_opts(opts, "marks")
   if not opts then return end
 
-  local marks = vim.fn.execute(
-    string.format("marks %s", opts.marks and opts.marks or ""))
+  local marks = vim.fn.execute("marks")
   marks = vim.split(marks, "\n")
 
   local entries = {}
-  local filter = opts.marks and vim.split(opts.marks, "")
+  local pattern = opts.marks and opts.marks or ""
   for i = #marks, 3, -1 do
     local mark, line, col, text = marks[i]:match("(.)%s+(%d+)%s+(%d+)%s+(.*)")
     col = tostring(tonumber(col) + 1)
     if path.is_absolute(text) then
       text = path.HOME_to_tilde(text)
     end
-    if not filter or vim.tbl_contains(filter, mark) then
+    if not pattern or string.match(mark, pattern) then
       table.insert(entries, string.format(" %-15s %15s %15s %s",
         utils.ansi_codes.yellow(mark),
         utils.ansi_codes.blue(line),
@@ -218,7 +248,7 @@ M.marks = function(opts)
     string.format("%-5s %s  %s %s", "mark", "line", "col", "file/text"))
 
   opts.fzf_opts["--header-lines"] = 1
-  --[[ opts.preview = shell.raw_action(function (args, fzf_lines, _)
+  --[[ opts.preview = function (args, fzf_lines, _)
     local mark = args[1]:match("[^ ]+")
     local bufnr, lnum, _, _ = unpack(vim.fn.getpos("'"..mark))
     if vim.api.nvim_buf_is_loaded(bufnr) then
@@ -230,7 +260,7 @@ M.marks = function(opts)
       end
       return "UNLOADED: " .. name
     end
-  end) ]]
+  end ]]
 
   core.fzf_exec(entries, opts)
 end
@@ -259,8 +289,9 @@ M.registers = function(opts)
     for k, v in pairs(gsub_map) do
       reg = reg:gsub(k, utils.ansi_codes.magenta(v))
     end
-    return not nl and reg or
-        reg:gsub("\n", utils.ansi_codes.magenta("\\n"))
+    return not nl and reg
+        or nl == 2 and reg:gsub("\n$", "")
+        or reg:gsub("\n", utils.ansi_codes.magenta("\\n"))
   end
 
   local entries = {}
@@ -269,18 +300,18 @@ M.registers = function(opts)
     -- E5108: Error executing lua Vim:clipboard:
     --        provider returned invalid data
     local _, contents = pcall(vim.fn.getreg, r)
-    contents = register_escape_special(contents, true)
+    contents = register_escape_special(contents, opts.multiline and 2 or 1)
     if (contents and #contents > 0) or not opts.ignore_empty then
       table.insert(entries, string.format("[%s] %s",
         utils.ansi_codes.yellow(r), contents))
     end
   end
 
-  opts.preview = shell.raw_action(function(args)
+  opts.preview = function(args)
     local r = args[1]:match("%[(.*)%] ")
     local _, contents = pcall(vim.fn.getreg, r)
     return contents and register_escape_special(contents) or args[1]
-  end, nil, opts.debug)
+  end
 
   core.fzf_exec(entries, opts)
 end
@@ -289,7 +320,7 @@ M.keymaps = function(opts)
   opts = config.normalize_opts(opts, "keymaps")
   if not opts then return end
 
-  local formatter = opts.formatter or "%s │ %-14s │ %-33s │ %s"
+  local formatter = "%s │ %-14s │ %-33s │ %s"
   local key_modes = opts.modes or { "n", "i", "c", "v", "t" }
   local modes = {
     n = "blue",
@@ -364,7 +395,7 @@ M.spell_suggest = function(opts)
   local cursor_word = vim.fn.expand "<cword>"
   local entries = vim.fn.spellsuggest(cursor_word)
 
-  if vim.tbl_isempty(entries) then return end
+  if utils.tbl_isempty(entries) then return end
 
   core.fzf_exec(entries, opts)
 end
@@ -374,7 +405,7 @@ M.filetypes = function(opts)
   if not opts then return end
 
   local entries = vim.fn.getcompletion("", "filetype")
-  if vim.tbl_isempty(entries) then return end
+  if utils.tbl_isempty(entries) then return end
 
   core.fzf_exec(entries, opts)
 end
@@ -385,7 +416,7 @@ M.packadd = function(opts)
 
   local entries = vim.fn.getcompletion("", "packadd")
 
-  if vim.tbl_isempty(entries) then return end
+  if utils.tbl_isempty(entries) then return end
 
   core.fzf_exec(entries, opts)
 end
@@ -409,12 +440,12 @@ M.menus = function(opts)
     end
   end
 
-  local entries = vim.tbl_flatten(vim.tbl_map(
+  local entries = utils.tbl_flatten(vim.tbl_map(
     function(x)
       return gen_menu_entries(nil, x)
     end, vim.fn.menu_get("")))
 
-  if vim.tbl_isempty(entries) then
+  if utils.tbl_isempty(entries) then
     utils.info("No menus available")
     return
   end
@@ -427,7 +458,7 @@ M.autocmds = function(opts)
   if not opts then return end
 
   local autocmds = vim.api.nvim_get_autocmds({})
-  if not autocmds or vim.tbl_isempty(autocmds) then
+  if not autocmds or utils.tbl_isempty(autocmds) then
     return
   end
 

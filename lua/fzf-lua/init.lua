@@ -4,6 +4,7 @@
 -- require("fzf-lua") from test specs (which also run headless)
 vim.g.fzf_lua_directory = ""
 
+local uv = vim.uv or vim.loop
 local path = require "fzf-lua.path"
 local utils = require "fzf-lua.utils"
 local config = require "fzf-lua.config"
@@ -11,7 +12,7 @@ local config = require "fzf-lua.config"
 do
   local function source_vimL(path_parts)
     local vimL_file = path.join(path_parts)
-    if vim.loop.fs_stat(vimL_file) then
+    if uv.fs_stat(vimL_file) then
       vim.cmd("source " .. vimL_file)
       -- print(string.format("loaded '%s'", vimL_file))
     end
@@ -19,14 +20,14 @@ do
 
   local currFile = debug.getinfo(1, "S").source:gsub("^@", "")
   vim.g.fzf_lua_directory = path.normalize(path.parent(currFile))
-  local fzf_lua_root = path.parent(path.parent(vim.g.fzf_lua_directory))
+  vim.g.fzf_lua_root = path.parent(path.parent(vim.g.fzf_lua_directory))
 
   -- Manually source the vimL script containing ':FzfLua' cmd
   -- does nothing if already loaded due to `vim.g.loaded_fzf_lua`
-  source_vimL({ fzf_lua_root, "plugin", "fzf-lua.vim" })
+  source_vimL({ vim.g.fzf_lua_root, "plugin", "fzf-lua.vim" })
   -- Autoload scipts dynamically loaded on `vim.fn[fzf_lua#...]` call
   -- `vim.fn.exists("*fzf_lua#...")` will return 0 unless we manuall source
-  source_vimL({ fzf_lua_root, "autoload", "fzf_lua.vim" })
+  source_vimL({ vim.g.fzf_lua_root, "autoload", "fzf_lua.vim" })
   -- Set var post source as the top of the file `require` will return 0
   -- due to it potentially being loaded before "autoload/fzf_lua.vim"
   utils.__HAS_AUTOLOAD_FNS = vim.fn.exists("*fzf_lua#getbufinfo") == 1
@@ -53,6 +54,7 @@ function M.setup_highlights(override)
     { "FzfLuaNormal",            "normal",         { default = default, link = "Normal" } },
     { "FzfLuaBorder",            "border",         { default = default, link = "Normal" } },
     { "FzfLuaTitle",             "title",          { default = default, link = "FzfLuaNormal" } },
+    { "FzfLuaBackdrop",          "backdrop",       { default = default, bg = "Black" } },
     { "FzfLuaHelpNormal",        "help_normal",    { default = default, link = "FzfLuaNormal" } },
     { "FzfLuaHelpBorder",        "help_border",    { default = default, link = "FzfLuaBorder" } },
     { "FzfLuaPreviewNormal",     "preview_normal", { default = default, link = "FzfLuaNormal" } },
@@ -67,18 +69,27 @@ function M.setup_highlights(override)
     { "FzfLuaScrollFloatEmpty",  "scrollfloat_e",  { default = default, link = "PmenuSbar" } },
     { "FzfLuaScrollFloatFull",   "scrollfloat_f",  { default = default, link = "PmenuThumb" } },
     { "FzfLuaDirIcon",           "dir_icon",       { default = default, link = "Directory" } },
+    { "FzfLuaDirPart",           "dir_part",       { default = default, link = "Comment" } },
+    { "FzfLuaFilePart", "file_part",
+      {
+        default = default,
+        link = utils.__HAS_NVIM_08 and "@none" or "Normal",
+      }
+    },
     -- Fzf terminal hls, colors from `vim.api.nvim_get_color_map()`
     { "FzfLuaHeaderBind", "header_bind",
       { default = default, fg = is_light and "MediumSpringGreen" or "BlanchedAlmond" } },
     { "FzfLuaHeaderText", "header_text",
       { default = default, fg = is_light and "Brown4" or "Brown1" } },
+    { "FzfLuaPathColNr", "path_colnr",   -- lines|blines|qf|diag|lsp
+      { default = default, fg = is_light and "CadetBlue4" or "CadetBlue1" } },
+    { "FzfLuaPathLineNr", "path_linenr", -- lines|blines|qf|diag|lsp
+      { default = default, fg = is_light and "MediumSpringGreen" or "LightGreen" } },
     { "FzfLuaLiveSym", "live_sym",
       { default = default, fg = is_light and "Brown4" or "Brown1" } },
     -- Provider specific highlights
     { "FzfLuaBufName", "buf_name",        -- lines|blines (hidden)
       { default = default, fg = is_light and "DarkOrchid3" or "LightMagenta" } },
-    { "FzfLuaBufLineNr", "buf_linenr",    -- lines|blines
-      { default = default, fg = is_light and "MediumSpringGreen" or "MediumSpringGreen" } },
     { "FzfLuaBufNr", "buf_nr",            -- buffers|tabs|lines|blines
       { default = default, fg = is_light and "AquaMarine3" or "BlanchedAlmond" } },
     { "FzfLuaBufFlagCur", "buf_flag_cur", -- buffers|tabs
@@ -89,6 +100,21 @@ function M.setup_highlights(override)
       { default = default, fg = is_light and "CadetBlue4" or "LightSkyBlue1", bold = true } },
     { "FzfLuaTabMarker", "tab_marker",    -- tabs
       { default = default, fg = is_light and "MediumSpringGreen" or "BlanchedAlmond", bold = true } },
+    -- highlight groups for `fzf_colors=true`
+    { "FzfLuaFzfNormal",     "fzf.normal",     { default = default, link = "FzfLuaNormal" } },
+    { "FzfLuaFzfCursorLine", "fzf.cursorline", { default = default, link = "FzfLuaCursorLine" } },
+    { "FzfLuaFzfMatch",      "fzf.match",      { default = default, link = "Special" } },
+    { "FzfLuaFzfBorder",     "fzf.border",     { default = default, link = "FzfLuaBorder" } },
+    { "FzfLuaFzfScrollbar",  "fzf.scrollbar",  { default = default, link = "FzfLuaFzfBorder" } },
+    { "FzfLuaFzfSeparator",  "fzf.separator",  { default = default, link = "FzfLuaFzfBorder" } },
+    { "FzfLuaFzfGutter",     "fzf.gutter",     { default = default, link = "FzfLuaNormal" } },
+    { "FzfLuaFzfHeader",     "fzf.header",     { default = default, link = "FzfLuaTitle" } },
+    { "FzfLuaFzfInfo",       "fzf.info",       { default = default, link = "NonText" } },
+    { "FzfLuaFzfPointer",    "fzf.pointer",    { default = default, link = "Special" } },
+    { "FzfLuaFzfMarker",     "fzf.marker",     { default = default, link = "FzfLuaFzfPointer" } },
+    { "FzfLuaFzfSpinner",    "fzf.spinner",    { default = default, link = "FzfLuaFzfPointer" } },
+    { "FzfLuaFzfPrompt",     "fzf.prompt",     { default = default, link = "Special" } },
+    { "FzfLuaFzfQuery",      "fzf.query",      { default = default, link = "FzfLuaNormal" } },
   }
   for _, a in ipairs(highlights) do
     local hl_name, _, hl_def = a[1], a[2], a[3]
@@ -210,12 +236,16 @@ do
     grep_cWORD = { "fzf-lua.providers.grep", "grep_cWORD" },
     grep_visual = { "fzf-lua.providers.grep", "grep_visual" },
     grep_curbuf = { "fzf-lua.providers.grep", "grep_curbuf" },
+    grep_quickfix = { "fzf-lua.providers.grep", "grep_quickfix" },
+    grep_loclist = { "fzf-lua.providers.grep", "grep_loclist" },
     grep_project = { "fzf-lua.providers.grep", "grep_project" },
     live_grep = { "fzf-lua.providers.grep", "live_grep" },
     live_grep_native = { "fzf-lua.providers.grep", "live_grep_native" },
     live_grep_resume = { "fzf-lua.providers.grep", "live_grep_resume" },
     live_grep_glob = { "fzf-lua.providers.grep", "live_grep_glob" },
     lgrep_curbuf = { "fzf-lua.providers.grep", "lgrep_curbuf" },
+    lgrep_quickfix = { "fzf-lua.providers.grep", "lgrep_quickfix" },
+    lgrep_loclist = { "fzf-lua.providers.grep", "lgrep_loclist" },
     tags = { "fzf-lua.providers.tags", "tags" },
     btags = { "fzf-lua.providers.tags", "btags" },
     tags_grep = { "fzf-lua.providers.tags", "grep" },
@@ -330,6 +360,14 @@ M.setup_fzfvim_cmds = function(...)
   return fn(...)
 end
 
+function M.hide()
+  return loadstring("return require'fzf-lua'.win.hide()")()
+end
+
+function M.unhide()
+  return loadstring("return require'fzf-lua'.win.unhide()")()
+end
+
 -- export the defaults module and deref
 M.defaults = require("fzf-lua.defaults").defaults
 
@@ -355,6 +393,7 @@ M._exported_modules = {
 -- excluded from builtin / auto-complete
 M._excluded_meta = {
   "setup",
+  "redraw",
   "fzf",
   "fzf_raw",
   "fzf_wrap",

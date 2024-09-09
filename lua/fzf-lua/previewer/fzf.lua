@@ -1,3 +1,4 @@
+local uv = vim.uv or vim.loop
 local path = require "fzf-lua.path"
 local shell = require "fzf-lua.shell"
 local utils = require "fzf-lua.utils"
@@ -172,16 +173,17 @@ local grep_tag = function(file, tag)
   else
     utils.warn(("previewer: unable to find pattern '%s' in file '%s'"):format(pattern, file))
   end
-  return line
+  return tonumber(line)
 end
 
 function Previewer.cmd_async:parse_entry_and_verify(entrystr)
   local entry = path.entry_to_file(entrystr, self.opts)
   -- make relative for bat's header display
-  local filepath = path.relative_to(entry.bufname or entry.path or "", vim.loop.cwd())
+  local filepath = path.relative_to(entry.bufname or entry.path or "", uv.cwd())
   if self.opts._ctag then
+    -- NOTE: override `entry.ctag` with the unescaped version
     entry.ctag = path.entry_to_ctag(entry.stripped, true)
-    if entry.line <= 1 then
+    if not tonumber(entry.line) or tonumber(entry.line) < 1 then
       -- default tags are without line numbers
       -- make sure we don't already have line #
       -- (in the case the line no. is actually 1)
@@ -192,11 +194,15 @@ function Previewer.cmd_async:parse_entry_and_verify(entrystr)
     end
   end
   local errcmd = nil
-  -- verify the file exists on disk and is accessible
-  if #filepath == 0 or not vim.loop.fs_stat(filepath) then
-    errcmd = "echo " .. libuv.shellescape(
-      string.format("'%s: NO SUCH FILE OR ACCESS DENIED",
-        filepath and #filepath > 0 and filepath or "<null>"))
+  if filepath:match("^%[DEBUG]") then
+    errcmd = "echo " .. libuv.shellescape(tostring(filepath:gsub("^%[DEBUG]", "")))
+  else
+    -- verify the file exists on disk and is accessible
+    if #filepath == 0 or not uv.fs_stat(filepath) then
+      errcmd = "echo " .. libuv.shellescape(
+        string.format("'%s: NO SUCH FILE OR ACCESS DENIED",
+          filepath and #filepath > 0 and filepath or "<null>"))
+    end
   end
   return filepath, entry, errcmd
 end
@@ -231,7 +237,7 @@ function Previewer.bat_async:_preview_offset()
   ]]
   if not self.args or not self.args:match("%-%-style=default") then
     -- we don't need affixed header unless we use bat default style
-    -- TODO: shuld also adjust for "--style=header-filename"
+    -- TODO: should also adjust for "--style=header-filename"
     if self.opts.line_field_index then
       return ("+%s-/2"):format(self.opts.line_field_index)
     end
@@ -267,7 +273,8 @@ function Previewer.bat_async:cmdline(o)
     local cmd = errcmd or ("%s %s %s %s %s %s"):format(
       self.cmd, self.args,
       self.theme and string.format([[--theme="%s"]], self.theme) or "",
-      self.opts.line_field_index and string.format("--highlight-line=%d", entry.line) or "",
+      self.opts.line_field_index and tonumber(entry.line) and tonumber(entry.line) > 0
+      and string.format("--highlight-line=%d", entry.line) or "",
       line_range,
       libuv.shellescape(filepath))
     return cmd
@@ -302,7 +309,7 @@ end
 function Previewer.git_diff:cmdline(o)
   o = o or {}
   local act = shell.raw_preview_action_cmd(function(items, fzf_lines, fzf_columns)
-    if not items or vim.tbl_isempty(items) then
+    if not items or utils.tbl_isempty(items) then
       utils.warn("shell error while running preview action.")
       return
     end
@@ -329,7 +336,7 @@ function Previewer.git_diff:cmdline(o)
     elseif is_deleted then
       cmd = self.cmd_deleted
     elseif is_untracked then
-      local stat = vim.loop.fs_stat(file.path)
+      local stat = uv.fs_stat(file.path)
       if stat and stat.type == "directory" then
         cmd = utils._if_win({ "dir" }, { "ls", "-la" })
       else
@@ -337,6 +344,7 @@ function Previewer.git_diff:cmdline(o)
       end
     end
     if not cmd then return "" end
+    if type(cmd) == "table" then return table.concat(cmd, " ") end
     local pager = ""
     if self.pager and #self.pager > 0 and
         vim.fn.executable(self.pager:match("[^%s]+")) == 1 then
@@ -378,19 +386,8 @@ Previewer.man_pages = Previewer.base:extend()
 
 function Previewer.man_pages:new(o, opts)
   Previewer.man_pages.super.new(self, o, opts)
-  if not self.cmd then
-    if utils.is_darwin() then
-      self.cmd = vim.fn.executable("bat") == 1
-          and [[man -P "bat -l man -p --color=always" %s]]
-          or "man -P cat %s"
-    else
-      self.cmd = vim.fn.executable("bat") == 1
-          and "man -c %s | bat -l man -p --color=always"
-          or "man %s"
-    end
-    self.cmd = self.cmd or vim.fn.executable("bat") == 1
-        and "bat -p -l help --color=always %s" or "cat %s"
-  end
+  self.cmd = o.cmd or "man -c %s | col -bx"
+  self.cmd = type(self.cmd) == "function" and self.cmd() or self.cmd
   return self
 end
 

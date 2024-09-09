@@ -1,3 +1,4 @@
+local uv = vim.uv or vim.loop
 local utils = require "fzf-lua.utils"
 local libuv = require "fzf-lua.libuv"
 local string_sub = string.sub
@@ -34,7 +35,7 @@ end
 M.byte_is_separator = function(byte)
   if utils.__IS_WINDOWS then
     -- path on windows can also be the result of `vim.fs.normalize`
-    -- so we need to test for the presense of both slash types
+    -- so we need to test for the presence of both slash types
     return byte == M.bslash_byte or byte == M.fslash_byte
   else
     return byte == M.fslash_byte
@@ -230,7 +231,7 @@ end
 
 -- I'm not sure why this happens given that neovim is single threaded
 -- but it seems that 'oldfiles' provider processing entries concurrently
--- crashes when trying to access `vim.env.HOME' from two differnt entries
+-- crashes when trying to access `vim.env.HOME' from two different entries
 -- at the same time due to being run in a coroutine (#447)
 M.HOME = function()
   if not M.__HOME then
@@ -291,6 +292,44 @@ local function find_next_separator(str, start_idx)
   end
 end
 
+local function utf8_char_len(s, i)
+  -- Get byte count of unicode character (RFC 3629)
+  local c = string_byte(s, i or 1)
+  if not c then
+    return
+  elseif c > 0 and c <= 127 then
+    return 1
+  elseif c >= 194 and c <= 223 then
+    return 2
+  elseif c >= 224 and c <= 239 then
+    return 3
+  elseif c >= 240 and c <= 244 then
+    return 4
+  end
+end
+
+local function utf8_sub(s, from, to)
+  local ret = ""
+  -- NOTE: this function is called from shorten right after finding the next
+  -- separaor that means `from` is a byte index and **NOT** a UTF8 char index
+  -- Advance to first requested UTF8 character index
+  -- local byte_i, utf8_i = 1, 1
+  -- while byte_i <= #s and utf8_i < from do
+  --   byte_i = byte_i + utf8_char_len(s, byte_i)
+  --   utf8_i = utf8_i + 1
+  -- end
+  local byte_i, utf8_i = from, from
+  -- Concat utf8 chars until "to" or end of string
+  while byte_i <= #s and (not to or utf8_i <= to) do
+    local c_len = utf8_char_len(s, byte_i)
+    local c = string_sub(s, byte_i, byte_i + c_len - 1)
+    ret = ret .. c
+    byte_i = byte_i + c_len
+    utf8_i = utf8_i + 1
+  end
+  return ret
+end
+
 function M.shorten(path, max_len, sep)
   -- caller can specify what separator to use
   sep = sep or M.separator(path)
@@ -306,9 +345,9 @@ function M.shorten(path, max_len, sep)
   repeat
     local i = find_next_separator(path, start_idx)
     local end_idx = i and start_idx + math.min(i - start_idx, max_len) - 1 or nil
-    local part = string_sub(path, start_idx, end_idx)
+    local part = utf8_sub(path, start_idx, end_idx)
     if end_idx and part == "." and i - start_idx > 1 then
-      part = string_sub(path, start_idx, end_idx + 1)
+      part = utf8_sub(path, start_idx, end_idx + 1)
     end
     table.insert(parts, part)
     if i then start_idx = i + 1 end
@@ -367,8 +406,8 @@ end
 
 function M.entry_to_location(entry, opts)
   local uri, line, col = entry:match("^(.*://.*):(%d+):(%d+):")
-  line = line and tonumber(line) or 1
-  col = col and tonumber(col) or 1
+  line = line and tonumber(line) > 0 and tonumber(line) or 1
+  col = col and tonumber(col) > 0 and tonumber(col) or 1
   if opts.path_shorten and uri:match("file://") then
     uri = "file://" .. M.lengthen(uri:sub(8))
   end
@@ -446,7 +485,7 @@ function M.entry_to_file(entry, opts, force_uri)
     local newfile = file
     for i = 2, #s do
       newfile = ("%s:%s"):format(newfile, s[i])
-      if vim.loop.fs_stat(newfile) then
+      if uv.fs_stat(newfile) then
         file = newfile
         line = s[i + 1]
         col = s[i + 2]
@@ -470,14 +509,18 @@ function M.entry_to_file(entry, opts, force_uri)
         and vim.api.nvim_buf_get_name(tonumber(bufnr)),
     terminal = terminal,
     path     = file,
-    line     = tonumber(line) or 1,
-    col      = tonumber(col) or 1,
+    line     = tonumber(line) or 0,
+    col      = tonumber(col) or 0,
+    ctag     = opts._ctag and M.entry_to_ctag(stripped) or nil,
   }
 end
 
 function M.git_cwd(cmd, opts)
   -- backward compat, used to be single cwd param
-  local o = opts or {}
+  -- NOTE: we use deepcopy due to a bug with Windows network drives starting with "\\"
+  -- as `vim.fn.expand` would reduce the double slash to a single slash modifying the
+  -- original `opts.cwd` ref (#1429)
+  local o = opts and utils.tbl_deep_clone(opts) or {}
   if type(o) == "string" then
     o = { cwd = o }
   end
@@ -491,7 +534,7 @@ function M.git_cwd(cmd, opts)
     local args = ""
     for _, a in ipairs(git_args) do
       if o[a[1]] then
-        o[a[1]] = a.noexpand and o[a[1]] or vim.fn.expand(o[a[1]])
+        o[a[1]] = a.noexpand and o[a[1]] or libuv.expand(o[a[1]])
         args = args .. ("%s %s "):format(a[2], libuv.shellescape(o[a[1]]))
       end
     end
@@ -501,7 +544,7 @@ function M.git_cwd(cmd, opts)
     cmd = utils.tbl_deep_clone(cmd)
     for _, a in ipairs(git_args) do
       if o[a[1]] then
-        o[a[1]] = a.noexpand and o[a[1]] or vim.fn.expand(o[a[1]])
+        o[a[1]] = a.noexpand and o[a[1]] or libuv.expand(o[a[1]])
         table.insert(cmd, idx, a[2])
         table.insert(cmd, idx + 1, o[a[1]])
         idx = idx + 2
@@ -534,6 +577,7 @@ function M.keymap_to_entry(str, opts)
     t = true,
   }
   local mode, keymap = string.match(str, "^(.-)│(.-)│")
+  if not mode or not keymap then return {} end
   mode, keymap = vim.trim(mode), vim.trim(keymap)
   mode = valid_modes[mode] and mode or "" -- only valid modes
   local vmap = utils.strsplit(
@@ -545,7 +589,56 @@ function M.keymap_to_entry(str, opts)
       entry = out[i]:match("<.-:%s+(.*)>")
     end
   end
-  return entry and M.entry_to_file(entry, opts) or { mode = mode, key = keymap, vmap = vmap }
+  return entry and M.entry_to_file(entry, opts) or { mode = mode, key = keymap, vmap = vmap } or {}
+end
+
+-- Minimal functionality so we can hijack during `vim.filetype.match`
+-- As of neovim 0.10 we only need to implement mode ":t"
+M._fnamemodify = function(fname, mods)
+  if mods == ":t" then
+    return M.tail(fname)
+  end
+  if mods == ":r" then
+    local tail = M.tail(fname)
+    return tail and tail[1] ~= "." and (fname:gsub("%.[^.]*$", "")) or tail
+  end
+  return fname
+end
+
+M._env = setmetatable({}, {
+  __index = function(_, index)
+    return os.getenv(index)
+  end
+})
+
+M._nvim_buf_get_lines = function() return {} end
+M._nvim_buf_line_count = function() return 0 end
+
+function M.ft_match(args)
+  if not args or not args.filename then
+    error('At least "filename" needs to be specified')
+  end
+
+  -- NOTE: code for `vim.filetype.match` is in "runtime/lua/vim/filetype.lua"
+  -- Hijack `vim.env` and `vim.fn.fnamemodify` in order to circumvent
+  -- E5560: Vimscript function must not be called in a lua loop callback
+  local _env = vim.env
+  local _fnamemodify = vim.fn.fnamemodify
+  local _nvim_buf_get_lines = vim.api.nvim_buf_get_lines
+  local _nvim_buf_line_count = vim.api.nvim_buf_line_count
+  vim.env = M._env
+  vim.fn.fnamemodify = M._fnamemodify
+  vim.api.nvim_buf_get_lines = M._nvim_buf_get_lines
+  vim.api.nvim_buf_line_count = M._nvim_buf_line_count
+  -- Normalize the path and replace "~" to prevent the internal
+  -- `normalize_path` from having to call `vim.env` or `vim.pesc`
+  local fname = M.normalize(M.tilde_to_HOME(args.filename))
+  local ok, ft, on_detect = pcall(vim.filetype.match, { filename = fname, buf = 0 })
+  vim.api.nvim_buf_get_lines = _nvim_buf_get_lines
+  vim.api.nvim_buf_line_count = _nvim_buf_line_count
+  vim.fn.fnamemodify = _fnamemodify
+  vim.env = _env
+  if ok then return ft, on_detect end
 end
 
 return M

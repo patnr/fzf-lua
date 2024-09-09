@@ -1,3 +1,4 @@
+local uv = vim.uv or vim.loop
 local core = require "fzf-lua.core"
 local path = require "fzf-lua.path"
 local utils = require "fzf-lua.utils"
@@ -7,7 +8,7 @@ local make_entry = require "fzf-lua.make_entry"
 
 local M = {}
 
-local function handler_capabilty(handler)
+local function handler_capability(handler)
   if utils.__HAS_NVIM_08 then
     return handler.server_capability
   else
@@ -16,7 +17,10 @@ local function handler_capabilty(handler)
 end
 
 local function check_capabilities(handler, silent)
-  local clients = vim.lsp.buf_get_clients(core.CTX().bufnr)
+  local clients = utils.__HAS_NVIM_011
+      and vim.lsp.get_clients({ bufnr = core.CTX().bufnr })
+      ---@diagnostic disable-next-line: deprecated
+      or vim.lsp.buf_get_clients(core.CTX().bufnr)
 
   -- return the number of clients supporting the feature
   -- so the async version knows how many callbacks to wait for
@@ -38,6 +42,7 @@ local function check_capabilities(handler, silent)
         num_clients = num_clients + 1
       end
     else
+      ---@diagnostic disable-next-line: undefined-field
       if client.resolved_capabilities[handler.resolved_capability] then
         num_clients = num_clients + 1
       end
@@ -83,35 +88,86 @@ local jump_to_location = function(opts, result, enc)
   return vim.lsp.util.jump_to_location(result, enc)
 end
 
+local regex_filter_fn = function(regex_filter)
+  if type(regex_filter) == "string" then
+    regex_filter = { regex_filter }
+  end
+  if type(regex_filter) == "function" then
+    return regex_filter
+  end
+  if type(regex_filter) == "table" and type(regex_filter[1]) == "string" then
+    return function(item, _)
+      if not item.text then return true end
+      local is_match = item.text:match(regex_filter[1]) ~= nil
+      if regex_filter.exclude then
+        return not is_match
+      else
+        return is_match
+      end
+    end
+  end
+  return false
+end
+
 local function location_handler(opts, cb, _, result, ctx, _)
   local encoding = vim.lsp.get_client_by_id(ctx.client_id).offset_encoding
-  result = vim.tbl_islist(result) and result or { result }
+  result = utils.tbl_islist(result) and result or { result }
+  -- HACK: make sure target URI is valid for buggy LSPs (#1317)
+  for i, x in ipairs(result) do
+    for _, k in ipairs({ "uri", "targetUri" }) do
+      if type(x[k]) == "string" and not x[k]:match("://") then
+        result[i][k] = "file://" .. result[i][k]
+      end
+    end
+  end
+  if opts.unique_line_items then
+    local lines = {}
+    local _result = {}
+    for _, loc in ipairs(result) do
+      local uri = loc.uri or loc.targetUri
+      local range = loc.range or loc.targetSelectionRange
+      if not lines[uri .. range.start.line] then
+        _result[#_result + 1] = loc
+        lines[uri .. range.start.line] = true
+      end
+    end
+    result = _result
+  end
   if opts.ignore_current_line then
+    local uri = vim.uri_from_bufnr(core.CTX().bufnr)
     local cursor_line = core.CTX().cursor[1] - 1
     result = vim.tbl_filter(function(l)
-      if l.range and l.range.start and l.range.start.line == cursor_line then
+      if (l.uri
+            and l.uri == uri
+            and utils.map_get(l, "range.start.line") == cursor_line)
+          or
+          (l.targetUri
+            and l.targetUri == uri
+            and utils.map_get(l, "targetRange.start.line") == cursor_line)
+      then
         return false
       end
       return true
     end, result)
   end
   local items = {}
+  if opts.regex_filter and opts._regex_filter_fn == nil then
+    opts._regex_filter_fn = regex_filter_fn(opts.regex_filter)
+  end
   -- Although `make_entry.file` filters for `cwd_only` we filter
   -- here to accurately determine `jump_to_single_result` (#980)
   result = vim.tbl_filter(function(x)
     local item = vim.lsp.util.locations_to_items({ x }, encoding)[1]
-    table.insert(items, item)
-    if opts.cwd_only and not path.is_relative_to(item.filename, opts.cwd) then
+    if (opts.cwd_only and not path.is_relative_to(item.filename, opts.cwd)) or
+        (opts._regex_filter_fn and not opts._regex_filter_fn(item, core.CTX())) then
       return false
     end
+    table.insert(items, item)
     return true
   end, result)
   -- Jump immediately if there is only one location
   if opts.jump_to_single_result and #result == 1 then
     jump_to_location(opts, result[1], encoding)
-  end
-  if opts.filter and type(opts.filter) == "function" then
-    items = opts.filter(items)
   end
   for _, entry in ipairs(items) do
     if not opts.current_buffer_only or core.CTX().bname == entry.filename then
@@ -179,7 +235,7 @@ local function symbols_to_items(symbols, bufnr, child_prefix)
 end
 
 local function symbol_handler(opts, cb, _, result, _, _)
-  result = vim.tbl_islist(result) and result or { result }
+  result = utils.tbl_islist(result) and result or { result }
   local items
   if opts.child_prefix then
     items = symbols_to_items(result, core.CTX().bufnr,
@@ -187,9 +243,12 @@ local function symbol_handler(opts, cb, _, result, _, _)
   else
     items = vim.lsp.util.symbols_to_items(result, core.CTX().bufnr)
   end
+  if opts.regex_filter and opts._regex_filter_fn == nil then
+    opts._regex_filter_fn = regex_filter_fn(opts.regex_filter)
+  end
   for _, entry in ipairs(items) do
     if (not opts.current_buffer_only or core.CTX().bname == entry.filename) and
-        (not opts.regex_filter or entry.text:match(opts.regex_filter)) then
+        (not opts._regex_filter_fn or opts._regex_filter_fn(entry, core.CTX())) then
       local mbicon_align = 0
       if opts.fn_reload and type(opts.query) == "string" and #opts.query > 0 then
         -- highlight exact matches with `live_workspace_symbols` (#1028)
@@ -230,7 +289,7 @@ local function symbol_handler(opts, cb, _, result, _, _)
           symbol = symbol .. string.rep(" ", align - #symbol)
         end
         entry = symbol .. utils.nbsp .. entry
-        cb(opts._fmt and opts._fmt.to and opts._fmt.to(entry, opts) or entry)
+        cb(entry)
       end
     end
   end
@@ -238,7 +297,7 @@ end
 
 local function code_action_handler(opts, cb, _, code_actions, context, _)
   if not opts.code_actions then opts.code_actions = {} end
-  local i = vim.tbl_count(opts.code_actions) + 1
+  local i = utils.tbl_count(opts.code_actions) + 1
   for _, action in ipairs(code_actions) do
     local text = string.format("%s %s",
       utils.ansi_codes.magenta(string.format("%d:", i)), action.title)
@@ -358,7 +417,7 @@ local function async_lsp_handler(co, handler, opts)
   return mk_handler(function(err, result, context, lspcfg)
     -- increment callback & result counters
     opts.num_callbacks = opts.num_callbacks + 1
-    opts.num_results = (opts.num_results or 0) + (result and vim.tbl_count(result) or 0)
+    opts.num_results = (opts.num_results or 0) + (result and utils.tbl_count(result) or 0)
     if err then
       if not opts.silent then
         utils.err(string.format("Error executing '%s': %s", handler.method, err))
@@ -432,7 +491,7 @@ local function gen_lsp_contents(opts)
           lsp_handler.handler(opts, cb, lsp_handler.method, response.result, context)
         end
       end
-      if vim.tbl_isempty(results) then
+      if utils.tbl_isempty(results) then
         if not opts.fn_reload and not opts.silent then
           utils.info(string.format("No %s found", string.lower(lsp_handler.label)))
         else
@@ -488,7 +547,7 @@ local function gen_lsp_contents(opts)
         -- cancel all lingering LSP queries
         fn_cancel_all(opts)
 
-        local async_buf_reqeust = function()
+        local async_buf_request = function()
           -- save cancel all fnref so we can cancel all requests
           -- when using `live_ws_symbols`
           _, opts._cancel_all = vim.lsp.buf_request(core.CTX().bufnr,
@@ -500,10 +559,10 @@ local function gen_lsp_contents(opts)
         -- E5560: nvim_exec_autocmds must not be called in a lua loop callback nil
         if vim.in_fast_event() then
           vim.schedule(function()
-            async_buf_reqeust()
+            async_buf_request()
           end)
         else
-          async_buf_reqeust()
+          async_buf_request()
         end
 
         -- process results from all LSP client
@@ -569,8 +628,8 @@ local normalize_lsp_opts = function(opts, cfg, __resume_key)
 
   -- required for relative paths presentation
   if not opts.cwd or #opts.cwd == 0 then
-    opts.cwd = vim.loop.cwd()
-  else
+    opts.cwd = uv.cwd()
+  elseif opts.cwd_only == nil then
     opts.cwd_only = true
   end
 
@@ -580,13 +639,13 @@ end
 local function fzf_lsp_locations(opts, fn_contents)
   opts = normalize_lsp_opts(opts, "lsp")
   if not opts then return end
-  if opts.force_uri == nil then opts.force_uri = true end
   opts = core.set_fzf_field_index(opts)
   opts = fn_contents(opts)
   if not opts.__contents then
     core.__CTX = nil
     return
   end
+  opts = core.set_header(opts, opts.headers or { "cwd", "regex_filter" })
   return core.fzf_exec(opts.__contents, opts)
 end
 
@@ -622,7 +681,6 @@ end
 M.finder = function(opts)
   opts = normalize_lsp_opts(opts, "lsp.finder")
   if not opts then return end
-  if opts.force_uri == nil then opts.force_uri = true end
   local contents = {}
   local lsp_params = opts.lsp_params
   for _, p in ipairs(opts.providers) do
@@ -633,7 +691,7 @@ M.finder = function(opts)
       opts.silent = opts.silent == nil and true or opts.silent
       opts.no_autoclose = true
       opts.lsp_handler = handlers[method]
-      opts.lsp_handler.capability = handler_capabilty(opts.lsp_handler)
+      opts.lsp_handler.capability = handler_capability(opts.lsp_handler)
       opts.lsp_params = lsp_params -- reset previous calls params if existed
 
       -- returns nil for no client attached, false for unsupported capability
@@ -664,6 +722,7 @@ M.finder = function(opts)
     core.__CTX = nil
     return
   end
+  opts = core.set_header(opts, opts.headers or { "cwd", "regex_filter" })
   opts = core.set_fzf_field_index(opts)
   return core.fzf_exec(contents, opts)
 end
@@ -712,7 +771,6 @@ M.document_symbols = function(opts)
   end
   opts = core.set_header(opts, opts.headers or { "regex_filter" })
   opts = core.set_fzf_field_index(opts)
-  if opts.force_uri == nil then opts.force_uri = true end
   if not opts.fzf_opts or opts.fzf_opts["--with-nth"] == nil then
     -- our delims are {nbsp,:} make sure entry has no icons
     -- "{nbsp}file:line:col:" and hide the last 4 fields
@@ -743,7 +801,6 @@ M.workspace_symbols = function(opts)
   opts = core.set_header(opts, opts.headers or
     { "actions", "cwd", "lsp_query", "regex_filter" })
   opts = core.set_fzf_field_index(opts)
-  if opts.force_uri == nil then opts.force_uri = true end
   opts = gen_lsp_contents(opts)
   if not opts.__contents then
     core.__CTX = nil
@@ -779,7 +836,7 @@ M.live_workspace_symbols = function(opts)
     utils.map_set(config, "__resume_data.last_query", val)
     -- also store query for `fzf_resume` (#963)
     utils.map_set(config, "__resume_data.opts.query", val)
-    -- store in opts for convinience in action callbacks
+    -- store in opts for convenience in action callbacks
     o.last_query = val
   end
   opts.__resume_get = function(what, o)
@@ -812,12 +869,11 @@ M.live_workspace_symbols = function(opts)
 
   opts = core.set_header(opts, opts.headers or { "actions", "cwd", "regex_filter" })
   opts = core.set_fzf_field_index(opts)
-  if opts.force_uri == nil then opts.force_uri = true end
   if opts.symbol_style or opts.symbol_fmt then
     opts.fn_pre_fzf = function() gen_sym2style_map(opts) end
     opts.fn_post_fzf = function() M._sym2style = nil end
   end
-  core.fzf_exec(nil, opts)
+  return core.fzf_exec(nil, opts)
 end
 
 -- Converts 'vim.diagnostic.get' to legacy style 'get_line_diagnostics()'
@@ -875,7 +931,7 @@ M.code_actions = function(opts)
     -- single results to be skipped with 'async = false'
     opts.jump_to_single_result = false
     opts.lsp_params = vim.lsp.util.make_range_params(0)
-    opts.lsp_params.context = {
+    opts.lsp_params.context = opts.context or {
       -- Neovim still uses `vim.lsp.diagnostic` API in "nvim/runtime/lua/vim/lsp/buf.lua"
       -- continue to use it until proven otherwise, this also fixes #707 as diagnostics
       -- must not be nil or some LSP servers will fail (e.g. ruff_lsp, rust_analyzer)
@@ -895,7 +951,7 @@ M.code_actions = function(opts)
   end
 
   opts.actions = opts.actions or {}
-  opts.actions.default = nil
+  opts.actions.enter = nil
   -- only dereg if we aren't registered
   if not registered then
     opts.post_action_cb = function()
@@ -905,7 +961,7 @@ M.code_actions = function(opts)
   -- 3rd arg are "once" options to override
   -- existing "registered" ui_select options
   ui_select.register(opts, true, opts)
-  vim.lsp.buf.code_action()
+  vim.lsp.buf.code_action({ context = opts.context, filter = opts.filter })
   -- vim.defer_fn(function()
   --   ui_select.deregister({}, true, true)
   -- end, 100)
@@ -915,15 +971,15 @@ local function wrap_fn(key, fn)
   return function(opts)
     opts = opts or {}
     opts.lsp_handler = handlers[key]
-    opts.lsp_handler.capability = handler_capabilty(opts.lsp_handler)
+    opts.lsp_handler.capability = handler_capability(opts.lsp_handler)
 
-    -- check_capabilities will print the approperiate warning
+    -- check_capabilities will print the appropriate warning
     if not check_capabilities(opts.lsp_handler) then
       return
     end
 
     -- Call the original method
-    fn(opts)
+    return fn(opts)
   end
 end
 

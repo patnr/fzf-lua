@@ -4,8 +4,8 @@ local utils = require "fzf-lua.utils"
 local libuv = require "fzf-lua.libuv"
 local Object = require "fzf-lua.class"
 
+local uv = vim.uv or vim.loop
 local api = vim.api
-local uv = vim.loop
 local fn = vim.fn
 
 local Previewer = {}
@@ -287,9 +287,10 @@ end
 
 function Previewer.base:cmdline(_)
   local act = shell.raw_action(function(items, _, _)
+    self.opts._last_query = type(items[2]) == "string" and items[2] or nil
     self:display_entry(items[1])
     return ""
-  end, "{}", self.opts.debug)
+  end, "{} {q}", self.opts.debug)
   return act
 end
 
@@ -331,7 +332,7 @@ function Previewer.base:scroll(direction)
   if preview_winid < 0 or not direction then return end
   if not api.nvim_win_is_valid(preview_winid) then return end
 
-  if direction == 0 then
+  if direction == "reset" then
     pcall(vim.api.nvim_win_call, preview_winid, function()
       -- for some reason 'nvim_win_set_cursor'
       -- only moves forward, so set to (1,0) first
@@ -342,14 +343,37 @@ function Previewer.base:scroll(direction)
       utils.zz()
     end)
   elseif not self:preview_is_terminal() then
-    -- local input = direction > 0 and [[]] or [[]]
-    -- local input = direction > 0 and [[]] or [[]]
-    -- ^D = 0x04, ^U = 0x15 ('g8' on char to display)
-    local input = ("%c"):format(utils._if(direction > 0, 0x04, 0x15))
-    pcall(vim.api.nvim_win_call, preview_winid, function()
-      vim.cmd([[norm! ]] .. input)
-      utils.zz()
-    end)
+    -- map direction to scroll commands ('g8' on char to display)
+    local input = ({
+      ["top"]            = "gg",
+      ["bottom"]         = "G",
+      ["half-page-up"]   = ("%c"):format(0x15), -- [[]]
+      ["half-page-down"] = ("%c"):format(0x04), -- [[]]
+      ["page-up"]        = ("%c"):format(0x02), -- [[]]
+      ["page-down"]      = ("%c"):format(0x06), -- [[]]
+      ["line-up"]        = "Mgk",               -- ^Y doesn't seem to work
+      ["line-down"]      = "Mgj",               -- ^E doesn't seem to work
+    })[direction]
+
+    if input then
+      pcall(vim.api.nvim_win_call, preview_winid, function()
+        -- ctrl-b (page-up) behaves in a non consistent way, unlike ctrl-u, if it can't
+        -- scroll a full page upwards it won't move the cursor, if the cursor is within
+        -- the first page it will still move the cursor to the bottom of the page (!?)
+        -- we therefore need special handling for both scenarios with `ctrl-b`:
+        --   (1) If the cursor is at line 1, do nothing
+        --   (2) Else, test the cursor before and after, if the new position is further
+        --       down the buffer than the original, we're in the first page ,goto line 1
+        local is_ctrl_b = string.byte(input, 1) == 2
+        local pos = is_ctrl_b and vim.api.nvim_win_get_cursor(0)
+        if is_ctrl_b and pos[1] == 1 then return end
+        vim.cmd([[norm! ]] .. input)
+        if is_ctrl_b and pos[1] <= vim.api.nvim_win_get_cursor(0)[1] then
+          vim.api.nvim_win_set_cursor(0, { 1, pos[2] })
+        end
+        utils.zz()
+      end)
+    end
   else
     -- we get here when using custom term commands using
     -- the extensions map (i.e. view term images with 'vui')
@@ -488,7 +512,7 @@ function Previewer.buffer_or_file:populate_terminal_cmd(tmpbuf, cmd, entry)
   -- the scrollbar which we wish to hide
   entry.no_scrollbar = true
   -- both ueberzug and terminal cmds need a clear
-  -- on redraw to fit the new window dimentions
+  -- on redraw to fit the new window dimensions
   self.clear_on_redraw = true
   -- 2nd arg `true`: minimal style window
   self:set_preview_buf(tmpbuf, true)
@@ -579,13 +603,13 @@ function Previewer.buffer_or_file:populate_preview_buf(entry_str)
   -- stop ueberzug shell job
   self:stop_ueberzug()
   local entry = self:parse_entry(entry_str)
-  if vim.tbl_isempty(entry) then return end
+  if utils.tbl_isempty(entry) then return end
   if entry.bufnr and not api.nvim_buf_is_loaded(entry.bufnr)
       and vim.api.nvim_buf_is_valid(entry.bufnr) then
     -- buffer is not loaded, can happen when calling "lines" with `set nohidden`
     -- or when starting nvim with an arglist, fix entry.path since it contains
     -- filename only
-    entry.path = path.relative_to(vim.api.nvim_buf_get_name(entry.bufnr), vim.loop.cwd())
+    entry.path = path.relative_to(vim.api.nvim_buf_get_name(entry.bufnr), uv.cwd())
   end
   if not self:should_load_buffer(entry) then
     -- same file/buffer as previous entry
@@ -638,7 +662,7 @@ function Previewer.buffer_or_file:populate_preview_buf(entry_str)
     assert(entry.path)
     -- not found in cache, attempt to load
     local tmpbuf = self:get_tmp_buffer()
-    if self.extensions and not vim.tbl_isempty(self.extensions) then
+    if self.extensions and not utils.tbl_isempty(self.extensions) then
       local ext = path.extension(entry.path)
       local cmd = ext and self.extensions[ext:lower()]
       if cmd and self:populate_terminal_cmd(tmpbuf, cmd, entry) then
@@ -652,21 +676,25 @@ function Previewer.buffer_or_file:populate_preview_buf(entry_str)
     end
     do
       local lines = nil
-      -- make sure the file is readable (or bad entry.path)
-      local fs_stat = vim.loop.fs_stat(entry.path)
-      if not entry.path or not fs_stat then
-        lines = { string.format("Unable to stat file %s", entry.path) }
-      elseif fs_stat.size > 0 and utils.perl_file_is_binary(entry.path) then
-        lines = { "Preview is not supported for binary files." }
-      elseif tonumber(self.limit_b) > 0 and fs_stat.size > self.limit_b then
-        lines = {
-          ("Preview file size limit (>%dMB) reached, file size %dMB.")
-              :format(self.limit_b / (1024 * 1024), fs_stat.size / (1024 * 1024)),
-          -- "(configured via 'previewers.builtin.limit_b')"
-        }
+      if entry.path:match("^%[DEBUG]") then
+        lines = { tostring(entry.path:gsub("^%[DEBUG]", "")) }
+      else
+        -- make sure the file is readable (or bad entry.path)
+        local fs_stat = uv.fs_stat(entry.path)
+        if not entry.path or not fs_stat then
+          lines = { string.format("Unable to stat file %s", entry.path) }
+        elseif fs_stat.size > 0 and utils.perl_file_is_binary(entry.path) then
+          lines = { "Preview is not supported for binary files." }
+        elseif tonumber(self.limit_b) > 0 and fs_stat.size > self.limit_b then
+          lines = {
+            ("Preview file size limit (>%dMB) reached, file size %dMB.")
+                :format(self.limit_b / (1024 * 1024), fs_stat.size / (1024 * 1024)),
+            -- "(configured via 'previewers.builtin.limit_b')"
+          }
+        end
       end
       if lines then
-        vim.api.nvim_buf_set_lines(tmpbuf, 0, -1, false, lines)
+        pcall(vim.api.nvim_buf_set_lines, tmpbuf, 0, -1, false, lines)
         -- swap preview buffer with new one
         self:set_preview_buf(tmpbuf)
         self:preview_buf_post(entry)
@@ -717,7 +745,7 @@ local ts_attach_08 = function(bufnr, ft)
   local is_table = type(config.additional_vim_regex_highlighting) == "table"
   if
       config.additional_vim_regex_highlighting
-      and (not is_table or vim.tbl_contains(config.additional_vim_regex_highlighting, lang))
+      and (not is_table or utils.tbl_contains(config.additional_vim_regex_highlighting, lang))
   then
     vim.bo[bufnr].syntax = ft
   end
@@ -757,14 +785,12 @@ function Previewer.buffer_or_file:do_syntax(entry)
       if self.syntax_limit_b > 0 and bytes > self.syntax_limit_b then
         syntax_limit_reached = 2
       end
-      if syntax_limit_reached > 0 then
+      if syntax_limit_reached > 0 and self.opts.silent == false then
         utils.info(string.format(
           "syntax disabled for '%s' (%s), consider increasing '%s(%d)'", entry.path,
-          utils._if(syntax_limit_reached == 1,
-            ("%d lines"):format(lcount),
-            ("%db"):format(bytes)),
-          utils._if(syntax_limit_reached == 1, "syntax_limit_l", "syntax_limit_b"),
-          utils._if(syntax_limit_reached == 1, self.syntax_limit_l, self.syntax_limit_b)
+          syntax_limit_reached == 1 and ("%d lines"):format(lcount) or ("%db"):format(bytes),
+          syntax_limit_reached == 1 and "syntax_limit_l" or "syntax_limit_b",
+          syntax_limit_reached == 1 and self.syntax_limit_l or self.syntax_limit_b
         ))
       end
       if syntax_limit_reached == 0 then
@@ -786,9 +812,9 @@ function Previewer.buffer_or_file:do_syntax(entry)
                   self.treesitter.enable == false or
                   self.treesitter.disable == true or
                   (type(self.treesitter.enable) == "table" and
-                    not vim.tbl_contains(self.treesitter.enable, ft)) or
+                    not utils.tbl_contains(self.treesitter.enable, ft)) or
                   (type(self.treesitter.disable) == "table" and
-                    vim.tbl_contains(self.treesitter.disable, ft)) then
+                    utils.tbl_contains(self.treesitter.disable, ft)) then
                 return false
               end
               return true
@@ -836,30 +862,48 @@ function Previewer.buffer_or_file:do_syntax(entry)
 end
 
 function Previewer.buffer_or_file:set_cursor_hl(entry)
-  pcall(vim.api.nvim_win_call, self.win.preview_winid, function()
-    local lnum, col = tonumber(entry.line), tonumber(entry.col)
-    local pattern = entry.pattern or entry.text
+  local mgrep = require("fzf-lua.providers.grep")
+  local regex = self.opts.__ACT_TO == mgrep.grep and self.opts._last_query
+      or self.opts.__ACT_TO == mgrep.live_grep and self.opts.search or nil
+  if regex and self.opts.rg_glob and self.opts.glob_separator then
+    regex = require("fzf-lua.make_entry").glob_parse(regex, self.opts)
+  end
 
+  pcall(vim.api.nvim_win_call, self.win.preview_winid, function()
+    local lnum, col = tonumber(entry.line), tonumber(entry.col) or 0
     if not lnum or lnum < 1 then
-      api.nvim_win_set_cursor(0, { 1, 0 })
-      if pattern ~= "" then
-        fn.search(pattern, "c")
+      vim.wo.cursorline = false
+      self.orig_pos = { 1, 0 }
+      api.nvim_win_set_cursor(0, self.orig_pos)
+      return
+    end
+
+    self.orig_pos = { lnum, math.max(0, col - 1) }
+    api.nvim_win_set_cursor(0, self.orig_pos)
+    fn.clearmatches()
+
+    -- If regex is available (grep/lgrep), match on current line
+    local regex_match_len = 0
+    if regex and self.win.hls.search then
+      -- vim.regex is always magic, see `:help vim.regex`
+      local ok, reg = pcall(vim.regex, utils.regex_to_magic(regex))
+      if ok then
+        _, regex_match_len = reg:match_line(self.preview_bufnr, lnum - 1, math.max(1, col) - 1)
+        regex_match_len = tonumber(regex_match_len) or 0
+      elseif self.opts.silent ~= true then
+        utils.warn(string.format([[Unable to init vim.regex with "%s", %s]], regex, reg))
       end
-    else
-      if not pcall(api.nvim_win_set_cursor, 0, { lnum, math.max(0, col - 1) }) then
-        return
+      if regex_match_len > 0 then
+        fn.matchaddpos(self.win.hls.search, { { lnum, math.max(1, col), regex_match_len } }, 11)
       end
+    end
+
+    -- Fallback to cursor hl, only if column exists
+    if regex_match_len <= 0 and self.win.hls.cursor and col > 0 then
+      fn.matchaddpos(self.win.hls.cursor, { { lnum, math.max(1, col) } }, 11)
     end
 
     utils.zz()
-
-    self.orig_pos = api.nvim_win_get_cursor(0)
-
-    fn.clearmatches()
-
-    if self.win.hls.cursor and not (lnum <= 1 and col <= 1) then
-      fn.matchaddpos(self.win.hls.cursor, { { lnum, math.max(1, col) } }, 11)
-    end
   end)
 end
 
@@ -867,15 +911,20 @@ function Previewer.buffer_or_file:update_border(entry)
   if self.title then
     local filepath = entry.path
     if filepath then
-      if self.opts.cwd then
-        filepath = path.relative_to(entry.path, self.opts.cwd)
+      if filepath:match("^%[DEBUG]") then
+        filepath = "[DEBUG]"
+      else
+        if self.opts.cwd then
+          filepath = path.relative_to(entry.path, self.opts.cwd)
+        end
+        filepath = path.HOME_to_tilde(filepath)
       end
-      filepath = path.HOME_to_tilde(filepath)
     end
-    local title = filepath or entry.uri
+    local title = filepath or entry.uri or entry.bufname
     -- was transform function defined?
     if self.title_fnamemodify then
-      title = self.title_fnamemodify(title)
+      local wincfg = vim.api.nvim_win_get_config(self.win.border_winid)
+      title = self.title_fnamemodify(title, wincfg and wincfg.width)
     end
     if entry.bufnr then
       title = string.format("buf %d: %s", entry.bufnr, title)
@@ -930,6 +979,9 @@ end
 
 function Previewer.help_tags:parse_entry(entry_str)
   local tag = entry_str:match("^[^%s]+")
+  if not tag then
+    return {}
+  end
   local vimdoc = entry_str:match(string.format("[^%s]+$", utils.nbsp))
   return {
     htag = tag,
@@ -981,6 +1033,7 @@ function Previewer.man_pages:new(o, opts, fzf_win)
   Previewer.man_pages.super.new(self, o, opts, fzf_win)
   self.filetype = "man"
   self.cmd = o.cmd or "man -c %s | col -bx"
+  self.cmd = type(self.cmd) == "function" and self.cmd() or self.cmd
   return self
 end
 
@@ -1011,6 +1064,7 @@ end
 function Previewer.marks:parse_entry(entry_str)
   local bufnr = nil
   local mark, lnum, col, filepath = entry_str:match("(.)%s+(%d+)%s+(%d+)%s+(.*)")
+  if not mark then return {} end
   -- try to acquire position from sending buffer
   -- if this succeeds (line>0) the mark is inside
   local pos = vim.api.nvim_buf_get_mark(self.win.src_bufnr, mark)
@@ -1019,13 +1073,13 @@ function Previewer.marks:parse_entry(entry_str)
     filepath = api.nvim_buf_get_name(bufnr)
   end
   if #filepath > 0 then
-    local ok, res = pcall(vim.fn.expand, filepath)
+    local ok, res = pcall(libuv.expand, filepath)
     if not ok then
       filepath = ""
     else
       filepath = res
     end
-    filepath = path.relative_to(filepath, vim.loop.cwd())
+    filepath = path.relative_to(filepath, uv.cwd())
   end
   return {
     bufnr = bufnr,
@@ -1043,14 +1097,15 @@ function Previewer.jumps:new(o, opts, fzf_win)
 end
 
 function Previewer.jumps:parse_entry(entry_str)
+  if entry_str == "" then return {} end
   local bufnr = nil
   local _, lnum, col, filepath = entry_str:match("(%d+)%s+(%d+)%s+(%d+)%s+(.*)")
   if filepath then
-    local ok, res = pcall(vim.fn.expand, filepath)
+    local ok, res = pcall(libuv.expand, filepath)
     if ok then
-      filepath = path.relative_to(res, vim.loop.cwd())
+      filepath = path.relative_to(res, uv.cwd())
     end
-    if not vim.loop.fs_stat(filepath) then
+    if not uv.fs_stat(filepath) then
       -- file is not accessible,
       -- text is a string from current buffer
       bufnr = self.win.src_bufnr
@@ -1070,16 +1125,6 @@ Previewer.tags = Previewer.buffer_or_file:extend()
 function Previewer.tags:new(o, opts, fzf_win)
   Previewer.tags.super.new(self, o, opts, fzf_win)
   return self
-end
-
-function Previewer.tags:parse_entry(entry_str)
-  -- first parse as normal entry
-  -- must use 'super.' and send self as 1st arg
-  -- or the ':' syntactic suger will send super's
-  -- self which doesn't have self.opts
-  local entry = self.super.parse_entry(self, entry_str)
-  entry.ctag = path.entry_to_ctag(entry_str)
-  return entry
 end
 
 function Previewer.tags:set_cursor_hl(entry)
@@ -1209,7 +1254,7 @@ function Previewer.quickfix:populate_preview_buf(entry_str)
   local qf_list = self.opts._is_loclist
       and vim.fn.getloclist(self.win.src_winid, { all = "", nr = tonumber(nr) })
       or vim.fn.getqflist({ all = "", nr = tonumber(nr) })
-  if vim.tbl_isempty(qf_list) or vim.tbl_isempty(qf_list.items) then
+  if utils.tbl_isempty(qf_list) or utils.tbl_isempty(qf_list.items) then
     return
   end
 
@@ -1217,7 +1262,7 @@ function Previewer.quickfix:populate_preview_buf(entry_str)
   for _, e in ipairs(qf_list.items) do
     table.insert(lines, string.format("%s|%d col %d|%s",
       path.HOME_to_tilde(path.relative_to(
-        vim.api.nvim_buf_get_name(e.bufnr), vim.loop.cwd())),
+        vim.api.nvim_buf_get_name(e.bufnr), uv.cwd())),
       e.lnum, e.col, e.text))
   end
   self.tmpbuf = self:get_tmp_buffer()
@@ -1251,7 +1296,7 @@ end
 function Previewer.autocmds:populate_preview_buf(entry_str)
   if not self.win or not self.win:validate_preview() then return end
   local entry = self:parse_entry(entry_str)
-  if vim.tbl_isempty(entry) then return end
+  if utils.tbl_isempty(entry) then return end
   self._is_vimL_command = false
   if entry.path == "<none>" then
     self._is_vimL_command = true

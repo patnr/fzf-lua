@@ -250,7 +250,7 @@ describe("Testing path module", function()
       { [[C:\a/\/b///\\\c]], [[c:\/\a\/b]],      { true, "c" } },
       { [[C:\a/b\c\d\e]],    [[c:\A\/b\]],       { true, [[c\d\e]] } },
       { [[C:\Users]],        [[c:\]],            { true, [[Users]] } },
-      { [[C:\Users\test]],   [[c:\]],            { true, [[Users\test]] } },
+      { [[C:\Users\foo]],    [[c:\]],            { true, [[Users\foo]] } },
       { [[C:\]],             [[C:\Users]],       { false, nil } },
       { [[C:]],              [[C:\Users]],       { false, nil } },
     }
@@ -316,6 +316,13 @@ describe("Testing path module", function()
     assert.are.equal(path.shorten("~/foo/bar/baz", 2), "~/fo/ba/baz")
     assert.are.equal(path.shorten("~/fo/barrr/baz", 3), "~/fo/bar/baz")
     assert.are.equal(path.shorten([[/foo\bar]]), [[/foo\bar]])
+    -- multibyte characters
+    assert.are.equal(path.shorten("/ñab/bar"), "/ñ/bar")
+    assert.are.equal(path.shorten("/אבגד/bar"), "/א/bar")
+    assert.are.equal(path.shorten("/こんにちは/bar"), "/こ/bar")
+    assert.are.equal(vim.fn.pathshorten("/ñab/bar"), path.shorten("/ñab/bar"))
+    assert.are.equal(vim.fn.pathshorten("/אבגד/bar"), path.shorten("/אבגד/bar"))
+    assert.are.equal(vim.fn.pathshorten("/こんにちは/bar"), path.shorten("/こんにちは/bar"))
 
     utils.__IS_WINDOWS = true
     assert.are.equal(path.shorten("/foo"), [[\foo]])

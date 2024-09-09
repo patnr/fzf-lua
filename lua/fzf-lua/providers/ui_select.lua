@@ -47,6 +47,7 @@ M.register = function(opts, silent, opts_once)
 end
 
 M.accept_item = function(selected, o)
+  if #selected == 0 then return end
   local idx = selected and tonumber(selected[1]:match("^(%d+)%.")) or nil
   o._on_choice(idx and o._items[idx] or nil, idx)
   o._on_choice_called = true
@@ -102,18 +103,17 @@ M.ui_select = function(items, ui_opts, on_choice)
   opts._on_choice = on_choice
   opts._ui_select = ui_opts
 
-  opts.actions = vim.tbl_deep_extend("keep",
-    opts.actions or {}, { ["default"] = M.accept_item })
+  opts.actions = vim.tbl_deep_extend("keep", opts.actions or {}, { ["enter"] = M.accept_item })
 
   config.set_action_helpstr(M.accept_item, "accept-item")
 
   opts.fn_selected = function(selected, o)
-    config.set_action_helpstr(opts.actions["default"], nil)
+    config.set_action_helpstr(o.actions.enter, nil)
 
     if not selected then
       -- with `actions.dummy_abort` this doesn't get called anymore
       -- as the action is configured as a valid fzf "accept" (thus
-      -- `selected` isn't empty), see below comment for mor info
+      -- `selected` isn't empty), see below comment for more info
       on_choice(nil, nil)
     else
       o._on_choice_called = nil
@@ -151,8 +151,15 @@ M.ui_select = function(items, ui_opts, on_choice)
     local previewer = _OPTS_ONCE.previewer
     _OPTS_ONCE.previewer = nil -- can't copy the previewer object
     opts = vim.tbl_deep_extend(opts_merge_strategy, _OPTS_ONCE, opts)
-    opts.actions = { ["default"] = opts.actions["default"] }
+    opts.actions = { ["enter"] = opts.actions.enter }
     opts.previewer = previewer
+    -- Callback to set the coroutine so we know if the interface
+    -- was opened or not (e.g. when no code actions are present)
+    opts.cb_co = (function()
+      -- NOTE: use clojure  as `_OPTS_ONCE` is otherwise nullified
+      local opts_once_ref = _OPTS_ONCE
+      return function(co) opts_once_ref._co = co end
+    end)()
     _OPTS_ONCE = nil
   end
 
