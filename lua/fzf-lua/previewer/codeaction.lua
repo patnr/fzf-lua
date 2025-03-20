@@ -245,11 +245,7 @@ end
 
 function M.builtin:populate_preview_buf(entry_str)
   if not self.win or not self.win:validate_preview() then return end
-  if entry_str == "" then
-    self:clear_preview_buf(true)
-    return
-  end
-  local idx = tonumber(entry_str:match("^%d+%."))
+  local idx = tonumber(entry_str:match("^%s*(%d+)%."))
   assert(type(idx) == "number")
   local lines = self:preview_action_tuple(idx,
     -- use the async version for "codeAction/resolve"
@@ -263,8 +259,8 @@ function M.builtin:populate_preview_buf(entry_str)
   vim.api.nvim_buf_set_lines(self.tmpbuf, 0, -1, false, lines)
   vim.bo[self.tmpbuf].filetype = "git"
   self:set_preview_buf(self.tmpbuf)
-  self.win:update_title(string.format(" Action #%d ", idx))
-  self.win:update_scrollbar()
+  self.win:update_preview_title(string.format(" Action #%d ", idx))
+  self.win:update_preview_scrollbar()
 end
 
 M.native = native.base:extend()
@@ -289,7 +285,7 @@ end
 function M.native:cmdline(o)
   o = o or {}
   local act = shell.raw_action(function(entries, _, _)
-    local idx = tonumber(entries[1]:match("^%d+%."))
+    local idx = tonumber(entries[1]:match("^%s*%d+%."))
     assert(type(idx) == "number")
     local lines = self:preview_action_tuple(idx)
     return table.concat(lines, "\r\n")

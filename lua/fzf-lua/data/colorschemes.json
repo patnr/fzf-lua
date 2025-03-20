@@ -190,7 +190,7 @@
     "url": "Mofiqul/vscode.nvim",
     "colorschemes": ["vscode"]
   },
-  "darcula.nvim": {
+  "dracula.nvim": {
     "disp_name": "Dracula",
     "url": "Mofiqul/dracula.nvim",
     "colorschemes": ["dracula"]
@@ -224,6 +224,20 @@
       {
         "disp_name": "Material Darker",
         "lua": "vim.g.material_style='darker'; vim.cmd.colorscheme('material')"
+      }
+    ]
+  },
+  "gruvbox-nvim": {
+    "disp_name": "Gruvbox.nvim",
+    "url": "ellisonleao/gruvbox.nvim",
+    "colorschemes": [
+      {
+        "disp_name": "Gruvbox Nvim Dark",
+        "lua": "vim.o.background = 'dark'; vim.cmd.colorscheme('gruvbox')"
+      },
+      {
+        "disp_name": "Gruvbox Nvim Light",
+        "lua": "vim.o.background = 'light'; vim.cmd.colorscheme('gruvbox')"
       }
     ]
   },
@@ -450,11 +464,11 @@
         "lua": "require('starry').setup({style={name='moonlight'}}); vim.cmd.colorscheme('starry')"
       },
       {
-        "disp_name": "Starry Darcula",
+        "disp_name": "Starry Dracula",
         "lua": "require('starry').setup({style={name='dracula'}}); vim.cmd.colorscheme('starry')"
       },
       {
-        "disp_name": "Starry Darcula Blood",
+        "disp_name": "Starry Dracula Blood",
         "lua": "require('starry').setup({style={name='dracula_blood'}}); vim.cmd.colorscheme('starry')"
       },
       {

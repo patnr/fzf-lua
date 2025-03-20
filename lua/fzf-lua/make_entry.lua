@@ -15,7 +15,7 @@ do
 end
 
 local function load_config_section(s, datatype, optional)
-  if not vim.g.fzf_lua_is_headless then
+  if not _G._fzf_lua_is_headless then
     local val = utils.map_get(config, s)
     return type(val) == datatype and val or nil
     ---@diagnostic disable-next-line: undefined-field
@@ -41,16 +41,21 @@ local function load_config_section(s, datatype, optional)
     if ok and is_bytecode then
       ok, res = pcall(loadstring, res)
     end
+    ---@diagnostic disable-next-line: undefined-field
+    if _G._debug == "v" or _G._debug == "verbose" then
+      ---@diagnostic disable-next-line: undefined-field
+      io.stdout:write(("[DEBUG] [load_config] %s = %s" .. (_G._EOL or "\n"))
+        :format(s, not ok and errmsg or res))
+    end
     if not ok and not optional then
-      io.stderr:write(("Error loading remote config section '%s': %s\n")
-        :format(s, errmsg))
+      io.stderr:write(("Error loading remote config section '%s': %s\n"):format(s, errmsg))
     elseif ok and type(res) == datatype then
       return res
     end
   end
 end
 
-if not config then
+if _G._fzf_lua_is_headless then
   local _config = { globals = { git = {}, files = {}, grep = {} } }
   _config.globals.git.icons = load_config_section("globals.git.icons", "table") or {}
   _config.globals.files.git_status_cmd =
@@ -79,7 +84,7 @@ M.get_diff_files = function(opts)
     local exec_str = string.format([[require"fzf-lua".utils.warn(]] ..
       [["'git status' took %.2f seconds, consider using `git_icons=false` in this repository or use `silent=true` to supress this message.")]]
       , seconds)
-    if not vim.g.fzf_lua_is_headless then
+    if not _G._fzf_lua_is_headless then
       loadstring(exec_str)()
     else
       ---@diagnostic disable-next-line: undefined-field
@@ -119,7 +124,7 @@ M.glob_parse = function(query, opts)
   end
   local glob_args = ""
   local search_query, glob_str = query:match("(.*)" .. opts.glob_separator .. "(.*)")
-  for _, s in ipairs(utils.strsplit(glob_str, "%s")) do
+  for _, s in ipairs(utils.strsplit(glob_str, "%s+")) do
     glob_args = glob_args .. ("%s %s "):format(opts.glob_flag, libuv.shellescape(s))
   end
   return search_query, glob_args
@@ -174,7 +179,7 @@ M.preprocess = function(opts)
       io.stdout:write(("[DEBUG] raw_argv(%d) = %s" .. EOL):format(idx, arg))
     end
     if utils.__IS_WINDOWS then
-      arg = libuv.unescape_fzf(arg, opts.__FZF_VERSION)
+      arg = libuv.unescape_fzf(arg, utils.has(opts, "fzf", { 0, 52 }) and 0.52 or 0)
     end
     if debug == "v" or debug == "verbose" then
       io.stdout:write(("[DEBUG] esc_argv(%d) = %s" .. EOL):format(idx, libuv.shellescape(arg)))
@@ -297,8 +302,6 @@ M.lcol = function(entry, opts)
     or (" " .. (opts and opts.trim_entry and vim.trim(entry.text) or entry.text)))
 end
 
-local COLON_BYTE = string.byte(":")
-
 ---@param x string
 ---@param opts table
 ---@return string? entry
@@ -317,7 +320,7 @@ M.file = function(x, opts)
       colon_start_idx = 3
     end
   end
-  local colon_idx = utils.find_next_char(x, COLON_BYTE, colon_start_idx) or 0
+  local colon_idx = x:find(":", colon_start_idx, true) or 0
   local file_part = colon_idx > 1 and x:sub(1, colon_idx - 1) or x
   local rest_of_line = colon_idx > 1 and x:sub(colon_idx) or nil
   -- strip ansi coloring from path so we can use filters
@@ -325,12 +328,18 @@ M.file = function(x, opts)
   -- TODO: we only support path modification without ANSI
   -- escape sequences, it becomes too expensive to modify
   -- and restore the path with escape sequences
-  local stripped_filepath, file_is_ansi = utils.strip_ansi_coloring(file_part)
+  local stripped_filepath, file_is_ansi = (function()
+    if opts.no_ansi_colors then
+      return file_part, 0
+    else
+      return utils.strip_ansi_coloring(file_part)
+    end
+  end)()
   local filepath = stripped_filepath
   -- fd v8.3 requires adding '--strip-cwd-prefix' to remove
   -- the './' prefix, will not work with '--color=always'
   -- https://github.com/sharkdp/fd/blob/master/CHANGELOG.md
-  if not (opts.strip_cwd_prefix == false) then
+  if opts.strip_cwd_prefix then
     filepath = path.strip_cwd_prefix(filepath)
   end
   -- make path relative
@@ -400,7 +409,8 @@ M.file = function(x, opts)
   else
     ret[#ret + 1] = file_is_ansi > 0
         -- filename is ansi escape colored, replace the inner string (#819)
-        and file_part:gsub(utils.lua_regex_escape(stripped_filepath), filepath)
+        -- escape `%` in path, since `string.gsub` also use it in target (#1443)
+        and file_part:gsub(utils.lua_regex_escape(stripped_filepath), (filepath:gsub("%%", "%%%%")))
         or filepath
   end
   -- multiline is only enabled with grep-like output PATH:LINE:COL:
@@ -416,7 +426,6 @@ M.file = function(x, opts)
           .. "\n"
           .. string.rep(" ", 4)
           .. rest_of_line:sub(#filespec + 1)
-          .. (opts.multiline > 1 and "\n" or "")
     end
   end
   ret[#ret + 1] = rest_of_line
@@ -438,6 +447,11 @@ M.tag = function(x, opts)
   -- from rg/grep output when using `tags_grep_xxx`
   local align = utils.has_ansi_coloring(name) and 47 or 30
   local line, tag = text:match("(%d-);?(/.*/)")
+  if not tag then
+    -- lines with a tag located solely by line number contain nothing but the
+    -- number at this point (e.g. using "ctags -R --excmd=number")
+    line = text:match("%d+")
+  end
   line = line and #line > 0 and tonumber(line)
   return string.format("%-" .. tostring(align) .. "s%s%s%s: %s",
     name,
@@ -483,6 +497,19 @@ M.git_status = function(x, opts)
     staged, utils.nbsp, unstaged, utils.nbsp .. utils.nbsp,
     (f2 and ("%s -> %s"):format(f1, f2) or f1))
   return entry
+end
+
+M.zoxide = function(x, opts)
+  local score, dir = x:match("(%d+%.%d+)%s+(.-)$")
+  if not score then return x end
+  if opts.cwd then
+    dir = path.relative_to(dir, opts.cwd)
+  end
+  local _fmt_postfix -- when using `path.filename_first` v2
+  if opts._fmt and type(opts._fmt.to) == "function" then
+    dir, _fmt_postfix = opts._fmt.to(dir, opts, { path = path, utils = utils })
+  end
+  return string.format("%8s\t%s%s", tostring(score), dir, _fmt_postfix or "")
 end
 
 return M

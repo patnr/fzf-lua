@@ -79,13 +79,13 @@ local jump_to_location = function(opts, result, enc)
   -- safe to call even if the interface is closed
   utils.fzf_exit()
 
-  local action = opts.jump_to_single_result_action
+  local action = opts.jump1_action
   if action then
     local entry = location_to_entry(result, enc)
-    return opts.jump_to_single_result_action({ entry }, opts)
+    return opts.jump1_action({ entry }, opts)
   end
 
-  return vim.lsp.util.jump_to_location(result, enc)
+  return utils.jump_to_location(result, enc)
 end
 
 local regex_filter_fn = function(regex_filter)
@@ -155,7 +155,7 @@ local function location_handler(opts, cb, _, result, ctx, _)
     opts._regex_filter_fn = regex_filter_fn(opts.regex_filter)
   end
   -- Although `make_entry.file` filters for `cwd_only` we filter
-  -- here to accurately determine `jump_to_single_result` (#980)
+  -- here to accurately determine `jump1` (#980)
   result = vim.tbl_filter(function(x)
     local item = vim.lsp.util.locations_to_items({ x }, encoding)[1]
     if (opts.cwd_only and not path.is_relative_to(item.filename, opts.cwd)) or
@@ -166,7 +166,7 @@ local function location_handler(opts, cb, _, result, ctx, _)
     return true
   end, result)
   -- Jump immediately if there is only one location
-  if opts.jump_to_single_result and #result == 1 then
+  if opts.jump1 and #result == 1 then
     jump_to_location(opts, result[1], encoding)
   end
   for _, entry in ipairs(items) do
@@ -178,17 +178,23 @@ local function location_handler(opts, cb, _, result, ctx, _)
   end
 end
 
-local function call_hierarchy_handler(opts, cb, _, result, _, _)
+local function call_hierarchy_handler(opts, cb, _, result, ctx, _)
+  local encoding = vim.lsp.get_client_by_id(ctx.client_id).offset_encoding
   for _, call_hierarchy_call in pairs(result) do
     --- "from" for incoming calls and "to" for outgoing calls
     local call_hierarchy_item = call_hierarchy_call.from or call_hierarchy_call.to
     for _, range in pairs(call_hierarchy_call.fromRanges) do
       local location = {
+        uri = call_hierarchy_item.uri,
+        range = range,
         filename = assert(vim.uri_to_fname(call_hierarchy_item.uri)),
         text = call_hierarchy_item.name,
         lnum = range.start.line + 1,
         col = range.start.character + 1,
       }
+      if opts.jump1 and #result == 1 then
+        jump_to_location(opts, location, encoding)
+      end
       local entry = make_entry.lcol(location, opts)
       entry = make_entry.file(entry, opts)
       if entry then cb(entry) end
@@ -234,14 +240,15 @@ local function symbols_to_items(symbols, bufnr, child_prefix)
   return _symbols_to_items(symbols, {}, bufnr or 0, "")
 end
 
-local function symbol_handler(opts, cb, _, result, _, _)
+local function symbol_handler(opts, cb, _, result, ctx, _)
   result = utils.tbl_islist(result) and result or { result }
   local items
   if opts.child_prefix then
     items = symbols_to_items(result, core.CTX().bufnr,
       opts.child_prefix == true and string.rep(" ", 2) or opts.child_prefix)
   else
-    items = vim.lsp.util.symbols_to_items(result, core.CTX().bufnr)
+    local encoding = vim.lsp.get_client_by_id(ctx.client_id).offset_encoding
+    items = vim.lsp.util.symbols_to_items(result, core.CTX().bufnr, encoding)
   end
   if opts.regex_filter and opts._regex_filter_fn == nil then
     opts._regex_filter_fn = regex_filter_fn(opts.regex_filter)
@@ -466,10 +473,19 @@ local function gen_lsp_contents(opts)
   -- build positional params for the LSP query
   -- from the context buffer and cursor position
   if not lsp_params then
-    lsp_params = vim.lsp.util.make_position_params(core.CTX().winid)
-    lsp_params.context = {
-      includeDeclaration = opts.includeDeclaration == nil and true or opts.includeDeclaration
-    }
+    lsp_params = function(client)
+      local params = vim.lsp.util.make_position_params(core.CTX().winid,
+        -- nvim 0.11 requires offset_encoding param, `client` is first arg of called func
+        -- https://github.com/neovim/neovim/commit/629483e24eed3f2c07e55e0540c553361e0345a2
+        client and client.offset_encoding or nil)
+      params.context = {
+        includeDeclaration = opts.includeDeclaration == nil and true or opts.includeDeclaration
+      }
+      return params
+    end
+    if not utils.__HAS_NVIM_011 and type(lsp_params) == "function" then
+      lsp_params = lsp_params()
+    end
   end
 
   if not opts.async then
@@ -492,14 +508,14 @@ local function gen_lsp_contents(opts)
         end
       end
       if utils.tbl_isempty(results) then
-        if not opts.fn_reload and not opts.silent then
-          utils.info(string.format("No %s found", string.lower(lsp_handler.label)))
-        else
+        if opts.fn_reload then
           -- return an empty set or the results wouldn't be
           -- cleared on live_workspace_symbols (#468)
           opts.__contents = {}
+        elseif not opts.silent then
+          utils.info(string.format("No %s found", string.lower(lsp_handler.label)))
         end
-      elseif not (opts.jump_to_single_result and #results == 1) then
+      elseif not (opts.jump1 and #results == 1) then
         -- LSP request was synchronous but we still asyncify the fzf feeding
         opts.__contents = function(fzf_cb)
           coroutine.wrap(function()
@@ -595,7 +611,11 @@ end
 
 -- see $VIMRUNTIME/lua/vim/buf.lua:pick_call_hierarchy_item()
 local function gen_lsp_contents_call_hierarchy(opts)
-  local lsp_params = opts.lsp_params or vim.lsp.util.make_position_params(core.CTX().winid)
+  local lsp_params = opts.lsp_params
+      or not utils.__HAS_NVIM_011 and vim.lsp.util.make_position_params(core.CTX().winid)
+      or function(client)
+        return vim.lsp.util.make_position_params(core.CTX().winid, client.offset_encoding)
+      end
   local method = "textDocument/prepareCallHierarchy"
   local res, err = vim.lsp.buf_request_sync(0, method, lsp_params, 2000)
   if err then
@@ -641,7 +661,7 @@ local function fzf_lsp_locations(opts, fn_contents)
   if not opts then return end
   opts = core.set_fzf_field_index(opts)
   opts = fn_contents(opts)
-  if not opts.__contents then
+  if not opts or not opts.__contents then
     core.__CTX = nil
     return
   end
@@ -806,6 +826,9 @@ M.workspace_symbols = function(opts)
     core.__CTX = nil
     return
   end
+  if utils.has(opts, "fzf") and not opts.prompt and opts.lsp_query and #opts.lsp_query > 0 then
+    opts.prompt = utils.ansi_from_hl(opts.hls.live_prompt, opts.lsp_query) .. " > "
+  end
   if opts.symbol_style or opts.symbol_fmt then
     opts.fn_pre_fzf = function() gen_sym2style_map(opts) end
     opts.fn_post_fzf = function() M._sym2style = nil end
@@ -821,11 +844,12 @@ M.live_workspace_symbols = function(opts)
   -- needed by 'actions.sym_lsym'
   opts.__ACT_TO = opts.__ACT_TO or M.workspace_symbols
 
+  -- NOTE: no longer used since we hl the query with `FzfLuaLivePrompt`
   -- prepend prompt with "*" to indicate "live" query
-  opts.prompt = type(opts.prompt) == "string" and opts.prompt or ""
-  if opts.live_ast_prefix ~= false then
-    opts.prompt = opts.prompt:match("^%*") and opts.prompt or ("*" .. opts.prompt)
-  end
+  -- opts.prompt = type(opts.prompt) == "string" and opts.prompt or "> "
+  -- if opts.live_ast_prefix ~= false then
+  --   opts.prompt = opts.prompt:match("^%*") and opts.prompt or ("*" .. opts.prompt)
+  -- end
 
   -- when using live_workspace_symbols there is no "query"
   -- the prompt input is the LSP query, store as "lsp_query"
@@ -880,10 +904,7 @@ end
 -- TODO: not needed anymore, it seems that `vim.lsp.buf.code_action` still
 -- uses the old `vim.lsp.diagnostic` API, we will do the same until neovim
 -- stops using this API
---[[ local function get_line_diagnostics(_)
-  if not vim.diagnostic then
-    return vim.lsp.diagnostic.get_line_diagnostics()
-  end
+local get_line_diagnostics = utils.__HAS_NVIM_011 and function(_)
   local diag = vim.diagnostic.get(core.CTX().bufnr, { lnum = vim.api.nvim_win_get_cursor(0)[1] - 1 })
   return diag and diag[1]
       and { {
@@ -907,7 +928,7 @@ end
       } }
       -- Must return an empty table or some LSP servers fail (#707)
       or {}
-end ]]
+end or vim.lsp.diagnostic.get_line_diagnostics
 
 M.code_actions = function(opts)
   opts = normalize_lsp_opts(opts, "lsp.code_actions")
@@ -929,14 +950,23 @@ M.code_actions = function(opts)
   if not registered then
     -- irrelevant for code actions and can cause
     -- single results to be skipped with 'async = false'
-    opts.jump_to_single_result = false
-    opts.lsp_params = vim.lsp.util.make_range_params(0)
-    opts.lsp_params.context = opts.context or {
-      -- Neovim still uses `vim.lsp.diagnostic` API in "nvim/runtime/lua/vim/lsp/buf.lua"
-      -- continue to use it until proven otherwise, this also fixes #707 as diagnostics
-      -- must not be nil or some LSP servers will fail (e.g. ruff_lsp, rust_analyzer)
-      diagnostics = vim.lsp.diagnostic.get_line_diagnostics(core.CTX().bufnr) or {}
-    }
+    opts.jump1 = false
+    opts.lsp_params = function(client)
+      local params = vim.lsp.util.make_range_params(core.CTX().winid,
+        -- nvim 0.11 requires offset_encoding param, `client` is first arg of called func
+        -- https://github.com/neovim/neovim/commit/629483e24eed3f2c07e55e0540c553361e0345a2
+        client and client.offset_encoding or nil)
+      params.context = opts.context or {
+        -- Neovim still uses `vim.lsp.diagnostic` API in "nvim/runtime/lua/vim/lsp/buf.lua"
+        -- continue to use it until proven otherwise, this also fixes #707 as diagnostics
+        -- must not be nil or some LSP servers will fail (e.g. ruff_lsp, rust_analyzer)
+        diagnostics = get_line_diagnostics(core.CTX().bufnr) or {}
+      }
+      return params
+    end
+    if not utils.__HAS_NVIM_011 and type(opts.lsp_params) == "function" then
+      opts.lsp_params = opts.lsp_params()
+    end
 
     -- make sure 'gen_lsp_contents' is run synchronously
     opts.async = false
@@ -947,7 +977,10 @@ M.code_actions = function(opts)
     local _, has_code_actions = gen_lsp_contents(opts)
 
     -- error or no sync request no results
-    if not has_code_actions then return end
+    if not has_code_actions then
+      core.__CTX = nil
+      return
+    end
   end
 
   opts.actions = opts.actions or {}

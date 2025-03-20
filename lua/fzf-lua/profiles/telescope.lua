@@ -13,7 +13,7 @@ return {
     width   = 0.8,
     height  = 0.9,
     preview = {
-      hidden       = "nohidden",
+      hidden       = false,
       vertical     = "up:45%",
       horizontal   = "right:50%",
       layout       = "flex",
@@ -46,7 +46,7 @@ return {
     ["hl+"] = { "fg", "TelescopeMatching" },
     ["info"] = { "fg", "TelescopeMultiSelection" },
     ["border"] = { "fg", "TelescopeBorder" },
-    ["gutter"] = { "bg", "TelescopeNormal" },
+    ["gutter"] = "-1",
     ["query"] = { "fg", "TelescopePromptNormal" },
     ["prompt"] = { "fg", "TelescopePromptPrefix" },
     ["pointer"] = { "fg", "TelescopeSelectionCaret" },
@@ -55,27 +55,12 @@ return {
   },
   keymap     = {
     builtin = {
-      ["<F1>"]     = "toggle-help",
-      ["<F2>"]     = "toggle-fullscreen",
-      -- Only valid with the 'builtin' previewer
-      ["<F3>"]     = "toggle-preview-wrap",
-      ["<F4>"]     = "toggle-preview",
-      ["<F5>"]     = "toggle-preview-ccw",
-      ["<F6>"]     = "toggle-preview-cw",
-      ["<C-d>"]    = "preview-page-down",
-      ["<C-u>"]    = "preview-page-up",
-      ["<S-left>"] = "preview-page-reset",
+      true,
+      ["<C-d>"] = "preview-page-down",
+      ["<C-u>"] = "preview-page-up",
     },
     fzf = {
-      ["ctrl-z"] = "abort",
-      ["ctrl-f"] = "half-page-down",
-      ["ctrl-b"] = "half-page-up",
-      ["ctrl-a"] = "beginning-of-line",
-      ["ctrl-e"] = "end-of-line",
-      ["alt-a"]  = "toggle-all",
-      -- Only valid with fzf previewers (bat/cat/git/etc)
-      ["f3"]     = "toggle-preview-wrap",
-      ["f4"]     = "toggle-preview",
+      true,
       ["ctrl-d"] = "preview-page-down",
       ["ctrl-u"] = "preview-page-up",
       ["ctrl-q"] = "select-all+accept",
@@ -83,11 +68,11 @@ return {
   },
   actions    = {
     files = {
-      ["enter"] = actions.file_edit_or_qf,
-      ["ctrl-x"]  = actions.file_split,
-      ["ctrl-v"]  = actions.file_vsplit,
-      ["ctrl-t"]  = actions.file_tabedit,
-      ["alt-q"]   = actions.file_sel_to_qf,
+      ["enter"]  = actions.file_edit_or_qf,
+      ["ctrl-x"] = actions.file_split,
+      ["ctrl-v"] = actions.file_vsplit,
+      ["ctrl-t"] = actions.file_tabedit,
+      ["alt-q"]  = actions.file_sel_to_qf,
     },
   },
   buffers    = {

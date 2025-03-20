@@ -46,6 +46,7 @@ local function setup_commands(no_override, prefix)
 end
 
 return {
+  { "default-prompt" }, -- base profile
   fn_load = setup_commands,
   desc = "fzf.vim defaults",
   winopts = {
@@ -54,14 +55,9 @@ return {
     row = 0.48,
     col = 0.45,
     preview = {
-      hidden = "hidden",
+      hidden = true,
       vertical = "up:45%",
     },
-  },
-  hls = {
-    border = "FloatBorder",
-    help_border = "FloatBorder",
-    preview_border = "FloatBorder",
   },
   fzf_opts = {
     -- nullify fzf-lua's settings to inherit from FZF_DEFAULT_OPTS
@@ -70,30 +66,14 @@ return {
   },
   keymap = {
     builtin = {
-      ["<F1>"]     = "toggle-help",
-      ["<F2>"]     = "toggle-fullscreen",
-      ["<F3>"]     = "toggle-preview-wrap",
+      true,
       -- nvim registers <C-/> as <C-_>, use insert mode
       -- and press <C-v><C-/> should output ^_
-      ["<C-_>"]    = "toggle-preview",
-      ["<F5>"]     = "toggle-preview-ccw",
-      ["<F6>"]     = "toggle-preview-cw",
-      ["<S-down>"] = "preview-page-down",
-      ["<S-up>"]   = "preview-page-up",
-      ["<S-left>"] = "preview-page-reset",
+      ["<C-_>"] = "toggle-preview",
     },
     fzf = {
-      ["ctrl-z"]     = "abort",
-      ["ctrl-u"]     = "unix-line-discard",
-      ["ctrl-f"]     = "half-page-down",
-      ["ctrl-b"]     = "half-page-up",
-      ["ctrl-a"]     = "beginning-of-line",
-      ["ctrl-e"]     = "end-of-line",
-      ["alt-a"]      = "toggle-all",
-      ["f3"]         = "toggle-preview-wrap",
-      ["ctrl-/"]     = "toggle-preview",
-      ["shift-down"] = "preview-page-down",
-      ["shift-up"]   = "preview-page-up",
+      true,
+      ["ctrl-/"] = "toggle-preview",
     },
   },
   actions = {

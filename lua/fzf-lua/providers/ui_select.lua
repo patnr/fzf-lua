@@ -48,7 +48,7 @@ end
 
 M.accept_item = function(selected, o)
   if #selected == 0 then return end
-  local idx = selected and tonumber(selected[1]:match("^(%d+)%.")) or nil
+  local idx = selected and tonumber(selected[1]:match("^%s*(%d+)%.")) or nil
   o._on_choice(idx and o._items[idx] or nil, idx)
   o._on_choice_called = true
 end
@@ -76,9 +76,11 @@ M.ui_select = function(items, ui_opts, on_choice)
     title = "Mark `mymainmenu` as defined global."
   } } ]]
   local entries = {}
+  local num_width = math.ceil(math.log10(#items))
+  local num_format_str = "%" .. num_width .. "d"
   for i, e in ipairs(items) do
     table.insert(entries,
-      ("%s. %s"):format(utils.ansi_codes.magenta(tostring(i)),
+      ("%s. %s"):format(utils.ansi_codes.magenta(num_format_str:format(i)),
         ui_opts.format_item and ui_opts.format_item(e) or tostring(e)))
   end
 
@@ -96,40 +98,51 @@ M.ui_select = function(items, ui_opts, on_choice)
 
   -- Force override prompt or it stays cached (#786)
   local prompt = ui_opts.prompt or "Select one of:"
-  opts.fzf_opts["--prompt"] = prompt:gsub(":%s?$", "> ")
+  opts.prompt = prompt:gsub(":%s?$", "> ")
 
   -- save items so we can access them from the action
   opts._items = items
   opts._on_choice = on_choice
   opts._ui_select = ui_opts
 
-  opts.actions = vim.tbl_deep_extend("keep", opts.actions or {}, { ["enter"] = M.accept_item })
-
-  config.set_action_helpstr(M.accept_item, "accept-item")
+  opts.actions = vim.tbl_deep_extend("keep", opts.actions or {}, {
+    ["enter"] = { fn = M.accept_item, desc = "accept-item" }
+  })
 
   opts.fn_selected = function(selected, o)
-    config.set_action_helpstr(o.actions.enter, nil)
-
-    if not selected then
-      -- with `actions.dummy_abort` this doesn't get called anymore
-      -- as the action is configured as a valid fzf "accept" (thus
-      -- `selected` isn't empty), see below comment for more info
-      on_choice(nil, nil)
-    else
-      o._on_choice_called = nil
-      actions.act(o.actions, selected, o)
-      if not o._on_choice_called then
-        -- see  comment above, `on_choice` wasn't called, either
-        -- "dummy_abort" (ctrl-c/esc) or (unlikely) the user setup
-        -- additional binds that aren't for "accept". Not calling
-        -- with nil (no action) can cause issues, for example with
-        -- dressing.nvim (#1014)
+    local function exec_choice()
+      if not selected then
+        -- with `actions.dummy_abort` this doesn't get called anymore
+        -- as the action is configured as a valid fzf "accept" (thus
+        -- `selected` isn't empty), see below comment for more info
         on_choice(nil, nil)
+      else
+        o._on_choice_called = nil
+        actions.act(selected, o)
+        if not o._on_choice_called then
+          -- see  comment above, `on_choice` wasn't called, either
+          -- "dummy_abort" (ctrl-c/esc) or (unlikely) the user setup
+          -- additional binds that aren't for "accept". Not calling
+          -- with nil (no action) can cause issues, for example with
+          -- dressing.nvim (#1014)
+          on_choice(nil, nil)
+        end
+      end
+
+      if opts.post_action_cb then
+        opts.post_action_cb()
       end
     end
 
-    if opts.post_action_cb then
-      opts.post_action_cb()
+    if o.__CTX.mode == "i" then
+      -- If called from INSERT mode we have to schedule the callback
+      -- till **after** the mode is changed (#1572)
+      vim.cmd [[noautocmd lua vim.api.nvim_feedkeys('i', 'n', true)]]
+      vim.api.nvim_create_autocmd("ModeChanged", {
+        pattern = "*:i*", once = true, callback = exec_choice
+      })
+    else
+      exec_choice()
     end
   end
 
@@ -151,7 +164,8 @@ M.ui_select = function(items, ui_opts, on_choice)
     local previewer = _OPTS_ONCE.previewer
     _OPTS_ONCE.previewer = nil -- can't copy the previewer object
     opts = vim.tbl_deep_extend(opts_merge_strategy, _OPTS_ONCE, opts)
-    opts.actions = { ["enter"] = opts.actions.enter }
+    opts.actions = vim.tbl_deep_extend("force", opts.actions or {},
+      { ["enter"] = opts.actions.enter })
     opts.previewer = previewer
     -- Callback to set the coroutine so we know if the interface
     -- was opened or not (e.g. when no code actions are present)

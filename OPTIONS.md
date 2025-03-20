@@ -117,6 +117,26 @@ If set to a `function` the return value will be used (`string|object`).
 
 If set to an `object`, fzf-lua expects a previewer class that will be initlaized with `object:new(...)`, see the advanced Wiki "Neovim builtin previewer" section for more info.
 
+#### setup.help_open_win
+
+Type: `fun(number, boolean, table)`,  Default: `vim.api.nvim_open_win`
+
+Function override for opening the help window (default bound to `<F1>`), will be called with the same arguments as `nvim_open_win(bufnr, enter, winopts)`. By default opens a floating window at the bottom of current screen.
+
+Override this function if you want to customize window configs of the help window (location, width, border, etc.).
+
+Example, opening a floating help window at the top of screen with single border:
+```lua
+    require("fzf-lua").setup({
+      help_open_win = function(buf, enter, opts)
+        opts.border = 'single'
+        opts.row = 0
+        opts.col = 0
+        return vim.api.nvim_open_win(buf, enter, opts)
+      end,
+    })
+```
+
 ---
 
 ## Global Options
@@ -265,9 +285,36 @@ Backdrop opacity value, 0 for fully opaque, 100 for fully transparent (i.e. disa
 
 #### globals.winopts.fullscreen
 
-Type: `fullscreen`, Default: `false`
+Type: `boolean`, Default: `false`
 
 Use fullscreen for the fzf-load floating window.
+
+#### globals.winopts.title
+
+Type: `string`, Default: `nil`
+
+Controls title display in the fzf window, set by the calling picker.
+
+#### globals.winopts.title_pos
+
+Type: `string`, Default: `center`
+
+Controls title display in the fzf window, possible values are `left|right|center`.
+
+#### globals.winopts.title_flags
+
+Type: `boolean`, Default: `nil`
+
+Set to `false` to disable fzf window title flags (hidden, ignore, etc).
+
+#### globals.winopts.treesitter
+
+Type: `boolean`, Default: `false`
+
+Use treesitter highlighting in fzf's main window.
+
+> **NOTE**: Only works for file-like entires where treesitter parser exists and is loaded
+> for the filetype.
 
 #### globals.winopts.on_create
 
@@ -277,19 +324,19 @@ Callback after the creation of the fzf-lua main terminal window.
 
 #### globals.winopts.preview.delay
 
-Type: `number`, Default: `100`
+Type: `number`, Default: `20`
 
 Debounce time (milliseconds) for displaying the preview buffer in the builtin previewer.
 
 #### globals.winopts.preview.wrap
 
-Type: `string`, Default: `nowrap`
+Type: `boolean`, Default: `false`
 
 Line wrap in both native fzf and the builtin previewer, mapped to fzf's `--preview-window:[no]wrap` flag.
 
 #### globals.winopts.preview.hidden
 
-Type: `string`, Default: `nohidden`
+Type: `boolean`, Default: `false`
 
 Preview startup visibility in both native fzf and the builtin previewer, mapped to fzf's `--preview-window:[no]hidden` flag.
 
@@ -306,12 +353,13 @@ Preview border for native fzf previewers (i.e. `bat`, `git_status`), set to `nob
 
 Type: `string`, Default: `flex`
 
-Preview layout, possible values are `horizontal|vertical|flex`, when set to `flex` neovim width is
-tested against `winopts.preview.flip_columns`, when <= `vertical` is used, otherwise `horizontal`.
+Preview layout, possible values are `horizontal|vertical|flex`, when set to `flex` fzf window
+width is tested against `winopts.preview.flip_columns`, when <= `vertical` is used, otherwise
+`horizontal`.
 
 #### globals.winopts.preview.flip_columns
 
-Type: `number`, Default: `120`
+Type: `number`, Default: `100`
 
 Auto-detect the preview layout based on available width, see above note in `winopts.preview.layout`.
 
@@ -352,19 +400,11 @@ Scrollbar style in the builtin previewer, set to `false` to disable, possible va
 
 #### globals.winopts.preview.scrolloff
 
-Type: `number`, Default: `-2`
+Type: `number`, Default: `-1`
 
 Float style scrollbar offset from the right edge of the preview window.
 
 <sub><sup>*Requires `winopts.preview.scrollbar=float`</sup></sub>
-
-#### globals.winopts.preview.scrollchars
-
-Type: `table`, Default: `{'█', '' }`
-
-Border style scrollbar characters `{ <full>, <empty> }`.
-
-<sub><sup>*Requires `winopts.preview.scrollbar=border`</sup></sub>
 
 #### globals.winopts.preview.winopts.number
 
@@ -443,6 +483,12 @@ Main fzf (terminal) window border highlight group.
 Type: `string`, Default: `FzfLuaTitle`
 
 Main fzf (terminal) window title highlight group.
+
+#### globals.hls.title_flags
+
+Type: `string`, Default: `CursorLine`
+
+Main fzf (terminal) window title flags highlight group (hidden, etc).
 
 #### globals.hls.backdrop
 
@@ -544,25 +590,37 @@ Interactive headers description highlight group, e.g. `<ctrl-g> to Disable .giti
 
 Type: `string`, Default: `FzfLuaPathLineNr`
 
-Highlight group for the line part of paths, e.g. `file:<line>:<col>:`, used in pickers such as `buffers`, `lines`, `quickfix`, `lsp`, `diagnostics`, etc.
+Highlight group for the line part of paths, e.g. `file:<line>:<col>:`, used in pickers such as `buffers`, `quickfix`, `lsp`, `diagnostics`, etc.
 
 #### globals.hls.path_colnr
 
 Type: `string`, Default: `FzfLuaPathColNr`
 
-Highlight group for the column part of paths, e.g. `file:<line>:<col>:`, used in pickers such as `buffers`, `lines`, `quickfix`, `lsp`, `diagnostics`, etc.
+Highlight group for the column part of paths, e.g. `file:<line>:<col>:`, used in pickers such as `buffers`, `quickfix`, `lsp`, `diagnostics`, etc.
 
 #### globals.hls.buf_name
 
 Type: `string`, Default: `FzfLuaBufName`
 
-Highlight group for buffer name in `lines`.
+Highlight group for buffer name (filepath) in `lines`.
+
+#### globals.hls.buf_id
+
+Type: `string`, Default: `FzfLuaBufId`
+
+Highlight group for buffer id (number) in `lines`.
 
 #### globals.hls.buf_nr
 
 Type: `string`, Default: `FzfLuaBufNr`
 
-Highlight group for buffer number in buffer type pickers, i.e. `buffers`, `tabs`, `lines`.
+Highlight group for buffer number in `buffers`, `tabs`.
+
+#### globals.hls.buf_linenr
+
+Type: `string`, Default: `FzfLuaBufLineNr`
+
+Highlight group for buffer line number in `lines`, `blines` and `treesitter`.
 
 #### globals.hls.buf_flag_cur
 
@@ -606,6 +664,12 @@ Highlight group for the directory part when using `path.dirname_first` or `path.
 Type: `string`, Default: `FzfLuaFilePart`
 
 Highlight group for the directory part when using `path.dirname_first` or `path.filename_first` formatters.
+
+#### globals.hls.live_prompt
+
+Type: `string`, Default: `FzfLuaLivePrompt`
+
+Highlight group for the prompt text in "live" pickers.
 
 #### globals.hls.live_sym
 
@@ -734,6 +798,10 @@ Location list (output of `:lopen`)
 
 Location list history (output of `:lhistory`)
 
+#### treesitter
+
+Current buffer treesitter symbols
+
 #### blines
 
 Current buffer lines
@@ -787,6 +855,20 @@ Length of shortened prompt path parts, e.g. set to `2`, `~/.config/nvim/lua/` wi
 Search for strings/regexes using `rg`, `grep` or any other compatible grep'er binary (e.g. `ag`).
 
 Unless `search=...` is specified will prompt for the search string.
+
+##### grep.search_paths
+
+Type: `[string]`, Default: `nil`
+
+list of paths to be grep'd, for example:
+
+```lua
+-- Using the vimL command
+:FzfLua live_grep search_paths=/path/to/search
+-- multiple paths using the lua command
+:lua FzfLua.grep({ search_paths = { "/path1", "path2" } })
+```
+
 
 #### live_grep
 
@@ -895,6 +977,10 @@ Git commits (project)
 #### git_bcommits
 
 Git commits (buffer)
+
+#### git_blame
+
+Git blame (buffer)
 
 #### git_branches
 
@@ -1059,6 +1145,10 @@ Neovim's autocmds
 
 Neovims key mappings
 
+#### nvim_options
+
+Neovim's options
+
 #### filetypes
 
 Filetypes
@@ -1121,11 +1211,15 @@ DAP active session variables
 DAP active session jump to frame
 
 
-### tmux
+### shell integrations
 
 #### tmux_buffers
 
 Tmux paste buffers
+
+#### zoxide
+
+Zoxide recent directories
 
 ---
 
@@ -1135,9 +1229,21 @@ Tmux paste buffers
 
 Complete path under cursor (incl dirs)
 
+##### complete_path.word_pattern
+
+Type: `string`, Default: `nil`
+
+The pattern used to match the word under the cursor. Text around the cursor position that matches will be used as the initial query and replaced by a chosen completion. The default matches anything but spaces and single/double quotes.
+
 #### complete_file
 
 Complete file under cursor (excl dirs)
+
+##### complete_file.word_pattern
+
+Type: `string`, Default: `nil`
+
+See [`complete_path.word_pattern`](#complete_path.word_pattern)
 
 #### complete_line
 
