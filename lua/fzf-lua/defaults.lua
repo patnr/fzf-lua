@@ -2,7 +2,6 @@ local path = require "fzf-lua.path"
 local utils = require "fzf-lua.utils"
 local actions = require "fzf-lua.actions"
 local previewers = require "fzf-lua.previewer"
-
 local M = {}
 
 function M._default_previewer_fn()
@@ -40,6 +39,9 @@ function M._man_cmd_fn(bat_pager)
   return string.format("%s %%s 2>/dev/null | %s", cmd, pager)
 end
 
+---missing fields are injected later, not sure how to tell luals about it
+---@diagnostic disable: missing-fields
+---@type fzf-lua.config.Defaults
 M.defaults                      = {
   nbsp          = utils.nbsp,
   winopts       = {
@@ -53,7 +55,7 @@ M.defaults                      = {
     fullscreen = false,
     title_pos  = "center",
     treesitter = {
-      enabled    = true,
+      enabled    = utils.__HAS_NVIM_010,
       fzf_colors = { ["hl"] = "-1:reverse", ["hl+"] = "-1:reverse" }
     },
     preview    = {
@@ -191,11 +193,11 @@ M.defaults                      = {
     },
     man = {
       _ctor = previewers.builtin.man_pages,
-      cmd = M._man_cmd_fn(),
+      cmd = function() return M._man_cmd_fn() end,
     },
     man_native = {
       _ctor = previewers.fzf.man_pages,
-      cmd = M._man_cmd_fn(true),
+      cmd = function() return M._man_cmd_fn(true) end,
     },
     help_tags = {
       _ctor = previewers.builtin.help_tags,
@@ -219,6 +221,7 @@ M.defaults                      = {
       ueberzug_scaler   = "cover",
       title_fnamemodify = function(s) return path.tail(s) end,
       render_markdown   = { enabled = true, filetypes = { ["markdown"] = true } },
+      snacks_image      = { enabled = true, render_inline = true },
       _ctor             = previewers.builtin.buffer_or_file,
     },
     codeaction = {
@@ -336,7 +339,8 @@ M.defaults                      = {
 M.defaults.files                = {
   previewer              = M._default_previewer_fn,
   cmd                    = nil, -- default: auto detect find|fd
-  multiprocess           = true,
+  multiprocess           = 1,
+  _type                  = "file",
   file_icons             = 1,
   color_icons            = true,
   git_icons              = false,
@@ -359,13 +363,62 @@ M.defaults.files                = {
   winopts                = { preview = { winopts = { cursorline = false } } },
 }
 
+---@diagnostic disable-next-line: assign-type-mismatch
+M.defaults.global               = vim.tbl_deep_extend("force", M.defaults.files, {
+  silent            = true,
+  -- TODO: lsp_workspace_symbols locate, not working yet
+  -- as opts.__locate_pos is inside the symbols picker opts
+  -- locate            = true,
+  cwd_prompt        = true,
+  line_query        = true,
+  pickers           = function()
+    local clients = utils.lsp_get_clients({ bufnr = utils.CTX().bufnr })
+    local doc_sym_supported = vim.iter(clients):any(function(client)
+      return client:supports_method("textDocument/documentSymbol")
+    end)
+    local wks_sym_supported = vim.iter(clients):any(function(client)
+      return client:supports_method("workspace/symbol")
+    end)
+    return {
+      { "files",   desc = "Files" },
+      { "buffers", desc = "Bufs", prefix = "$" },
+      doc_sym_supported and { "lsp_document_symbols", desc = "Symbols (buf)", prefix = "@" } or {
+        "btags",
+        desc = "Tags (buf)",
+        prefix = "@",
+        opts = {
+          previewer    = { _ctor = previewers.builtin.tags },
+          fn_transform = [[return require("fzf-lua.make_entry").tag]],
+        }
+      },
+      wks_sym_supported and { "lsp_workspace_symbols", desc = "Symbols (project)", prefix = "#" } or
+      {
+        "tags",
+        desc = "Tags (project)",
+        prefix = "#",
+        opts = {
+          previewer    = { _ctor = previewers.builtin.tags },
+          fn_transform = [[return require("fzf-lua.make_entry").tag]],
+          rg_opts      = "--no-heading --color=always --smart-case",
+          grep_opts    = "--color=auto --perl-regexp",
+        }
+      },
+    }
+  end,
+  fzf_opts          = { ["--nth"] = false, ["--with-nth"] = false },
+  winopts           = { preview = { winopts = { cursorline = true } } },
+  _ctx              = { includeBuflist = true }, -- we include a buffer picker
+  _fzf_nth_devicons = false,
+})
+
 -- Must construct our opts table in stages
 -- so we can reference 'M.globals.files'
 M.defaults.git                  = {
   files = {
     previewer         = M._default_previewer_fn,
     cmd               = "git ls-files --exclude-standard",
-    multiprocess      = true,
+    multiprocess      = 1,
+    _type             = "file",
     file_icons        = 1,
     color_icons       = true,
     git_icons         = true,
@@ -380,6 +433,8 @@ M.defaults.git                  = {
     cmd               = "git -c color.status=false --no-optional-locks status --porcelain=v1 -u",
     previewer         = "git_diff",
     multiprocess      = true,
+    fn_transform      = [[return require("fzf-lua.make_entry").git_status]],
+    fn_preprocess     = [[return require("fzf-lua.make_entry").preprocess]],
     file_icons        = 1,
     color_icons       = true,
     fzf_opts          = { ["--multi"] = true },
@@ -393,6 +448,36 @@ M.defaults.git                  = {
       -- ["ctrl-s"] = { fn = actions.git_stage_unstage, reload = true },
       -- ["ctrl-s"] = { actions.git_stage_unstage, actions.resume },
     },
+  },
+  diff = {
+    cmd               = "git --no-pager diff --name-only {ref}",
+    ref               = "HEAD",
+    preview           = "git diff {ref} {file}",
+    preview_pager     = M._preview_pager_fn,
+    multiprocess      = 1,
+    _type             = "file",
+    file_icons        = 1,
+    color_icons       = true,
+    fzf_opts          = { ["--multi"] = true },
+    _fzf_nth_devicons = true,
+    _actions          = function() return M.globals.actions.files end,
+  },
+  hunks = {
+    previewer         = M._default_previewer_fn,
+    cmd               = "git --no-pager diff --color=always {ref}",
+    ref               = "HEAD",
+    multiprocess      = true,
+    fn_transform      = [[return require("fzf-lua.make_entry").git_hunk]],
+    fn_preprocess     = [[return require("fzf-lua.make_entry").preprocess]],
+    file_icons        = 1,
+    color_icons       = true,
+    fzf_opts          = {
+      ["--multi"] = true,
+      ["--delimiter"] = ":",
+      ["--nth"] = "3..",
+    },
+    _fzf_nth_devicons = true,
+    _actions          = function() return M.globals.actions.files end,
   },
   commits = {
     cmd           = [[git log --color --pretty=format:"%C(yellow)%h%Creset ]]
@@ -435,7 +520,7 @@ M.defaults.git                  = {
     fzf_opts      = { ["--no-multi"] = true },
     _multiline    = false,
     -- `winopts.treesitter==true` line match format
-    _treesitter   = "(%s+)(%d+)%)(.+)$",
+    _treesitter   = function(line) return line:match("(%s+)(%d+)%)(.+)$") end,
   },
   branches = {
     cmd        = "git branch --all --color",
@@ -493,7 +578,8 @@ M.defaults.grep                 = {
   previewer      = M._default_previewer_fn,
   input_prompt   = "Grep For> ",
   cmd            = nil, -- default: auto detect rg|grep
-  multiprocess   = true,
+  multiprocess   = 1,
+  _type          = "file",
   file_icons     = 1,
   color_icons    = true,
   git_icons      = false,
@@ -514,6 +600,7 @@ M.defaults.grep                 = {
   _treesitter    = true,
 }
 
+---@diagnostic disable-next-line: assign-type-mismatch
 M.defaults.grep_curbuf          = vim.tbl_deep_extend("force", M.defaults.grep, {
   rg_glob          = false, -- meaningless for single file rg
   exec_empty_query = true,  -- makes sense to display lines immediately
@@ -553,8 +640,13 @@ M.defaults.quickfix             = {
   file_icons  = 1,
   color_icons = true,
   git_icons   = false,
-  only_valid  = false,
-  fzf_opts    = { ["--multi"] = true },
+  valid_only  = false,
+  fzf_opts    = {
+    ["--multi"]     = true,
+    ["--delimiter"] = "[\\]:]",
+    ["--with-nth"]  = "2..",
+  },
+  actions     = { ["ctrl-x"] = { fn = actions.list_del, reload = true } },
   _actions    = function() return M.globals.actions.files end,
   _treesitter = true,
   _cached_hls = { "path_colnr", "path_linenr" },
@@ -573,8 +665,13 @@ M.defaults.loclist              = {
   file_icons  = 1,
   color_icons = true,
   git_icons   = false,
-  only_valid  = false,
-  fzf_opts    = { ["--multi"] = true },
+  valid_only  = false,
+  fzf_opts    = {
+    ["--multi"]     = true,
+    ["--delimiter"] = "[\\]:]",
+    ["--with-nth"]  = "2..",
+  },
+  actions     = { ["ctrl-x"] = { fn = actions.list_del, reload = true } },
   _actions    = function() return M.globals.actions.files end,
   _treesitter = true,
   _cached_hls = { "path_colnr", "path_linenr" },
@@ -604,27 +701,32 @@ M.defaults.buffers              = {
   end,
   actions               = { ["ctrl-x"] = { fn = actions.buf_del, reload = true } },
   _cached_hls           = { "buf_nr", "buf_flag_cur", "buf_flag_alt", "path_linenr" },
+  _ctx                  = { includeBuflist = true },
+  _resume_reload        = true,
 }
 
 M.defaults.tabs                 = {
-  previewer   = M._default_previewer_fn,
-  tab_title   = "Tab",
-  tab_marker  = "<<",
-  file_icons  = 1,
-  color_icons = true,
-  _actions    = function()
+  previewer      = M._default_previewer_fn,
+  tab_title      = "Tab",
+  tab_marker     = "<<",
+  locate         = true,
+  file_icons     = 1,
+  color_icons    = true,
+  _actions       = function()
     return M.globals.actions.buffers or M.globals.actions.files
   end,
-  actions     = {
+  actions        = {
     ["enter"]  = actions.buf_switch,
     ["ctrl-x"] = { fn = actions.buf_del, reload = true },
   },
-  fzf_opts    = {
+  fzf_opts       = {
     ["--multi"]     = true,
     ["--delimiter"] = "[\\):]",
     ["--with-nth"]  = "5..",
   },
-  _cached_hls = { "buf_nr", "buf_flag_cur", "buf_flag_alt", "tab_title", "tab_marker", "path_linenr" },
+  _cached_hls    = { "buf_nr", "buf_flag_cur", "buf_flag_alt", "tab_title", "tab_marker", "path_linenr" },
+  _ctx           = { includeBuflist = true },
+  _resume_reload = true,
 }
 
 M.defaults.lines                = {
@@ -664,14 +766,20 @@ M.defaults.lines                = {
   _actions         = function()
     return M.globals.actions.buffers or M.globals.actions.files
   end,
+  _ctx             = { includeBuflist = true },
 }
 
+---@diagnostic disable-next-line: assign-type-mismatch
 M.defaults.blines               = vim.tbl_deep_extend("force", M.defaults.lines, {
-  show_bufname = false,
-  fzf_opts     = {
+  show_bufname    = false,
+  show_unloaded   = true,
+  show_unlisted   = true,
+  no_term_buffers = false,
+  fzf_opts        = {
     ["--with-nth"] = "4..",
     ["--nth"]      = "2..",
   },
+  _resume_reload  = true,
 })
 
 M.defaults.treesitter           = {
@@ -697,24 +805,53 @@ M.defaults.treesitter           = {
   },
 }
 
+M.defaults.spellcheck           = {
+  previewer        = M._default_previewer_fn,
+  file_icons       = false,
+  color_icons      = false,
+  word_separator   = "[%s%p]",
+  fzf_opts         = {
+    ["--multi"]     = true,
+    ["--tabstop"]   = "4",
+    ["--delimiter"] = "[:]",
+    ["--with-nth"]  = "2..",
+  },
+  line_field_index = "{2}",
+  _actions         = function()
+    return M.globals.actions.buffers or M.globals.actions.files
+  end,
+  actions          = {
+    ["ctrl-s"] = { fn = actions.spell_suggest, header = "spell suggest" }
+  },
+  _cached_hls      = { "buf_name", "buf_nr", "buf_linenr", "path_colnr" },
+  _fmt             = {
+    to   = false,
+    from = function(s, _)
+      return s:gsub("\t\t", ": ")
+    end
+  },
+}
+
 M.defaults.tags                 = {
-  previewer    = { _ctor = previewers.builtin.tags },
-  input_prompt = "[tags] Grep For> ",
-  ctags_file   = nil, -- auto-detect
-  rg_opts      = "--no-heading --color=always --smart-case",
-  grep_opts    = "--color=auto --perl-regexp",
-  multiprocess = true,
-  file_icons   = 1,
-  git_icons    = false,
-  color_icons  = true,
-  fzf_opts     = {
+  previewer     = { _ctor = previewers.builtin.tags },
+  input_prompt  = "[tags] Grep For> ",
+  ctags_file    = nil, -- auto-detect
+  rg_opts       = "--no-heading --color=always --smart-case",
+  grep_opts     = "--color=auto --perl-regexp",
+  multiprocess  = true,
+  fn_transform  = [[return require("fzf-lua.make_entry").tag]],
+  fn_preprocess = [[return require("fzf-lua.make_entry").preprocess]],
+  file_icons    = 1,
+  git_icons     = false,
+  color_icons   = true,
+  fzf_opts      = {
     ["--no-multi"]  = true,
     ["--delimiter"] = string.format("[:%s]", utils.nbsp),
     ["--tiebreak"]  = "begin",
   },
-  _actions     = function() return M.globals.actions.files end,
-  actions      = { ["ctrl-g"] = { actions.grep_lgrep } },
-  formatter    = false,
+  _actions      = function() return M.globals.actions.files end,
+  actions       = { ["ctrl-g"] = { actions.grep_lgrep } },
+  formatter     = false,
 }
 
 M.defaults.btags                = {
@@ -723,6 +860,8 @@ M.defaults.btags                = {
   rg_opts       = "--color=never --no-heading",
   grep_opts     = "--color=never --perl-regexp",
   multiprocess  = true,
+  fn_transform  = [[return require("fzf-lua.make_entry").tag]],
+  fn_preprocess = [[return require("fzf-lua.make_entry").preprocess]],
   file_icons    = false,
   git_icons     = false,
   color_icons   = true,
@@ -749,6 +888,7 @@ M.defaults.highlights           = {
   fzf_opts   = { ["--no-multi"] = true },
   fzf_colors = { ["hl"] = "-1:reverse", ["hl+"] = "-1:reverse" },
   previewer  = { _ctor = previewers.builtin.highlights, },
+  actions    = { ["enter"] = actions.hi }
 }
 
 M.defaults.awesome_colorschemes = {
@@ -769,7 +909,7 @@ M.defaults.awesome_colorschemes = {
   actions      = {
     ["enter"]  = actions.colorscheme,
     ["ctrl-g"] = { fn = actions.toggle_bg, exec_silent = true },
-    ["ctrl-r"] = { fn = actions.cs_update, reload = true },
+    ["ctrl-d"] = { fn = actions.cs_update, reload = true },
     ["ctrl-x"] = { fn = actions.cs_delete, reload = true },
   }
 }
@@ -822,6 +962,7 @@ M.defaults.lsp                  = {
 
 M.defaults.lsp.symbols          = {
   previewer        = M._default_previewer_fn,
+  locate           = false,
   file_icons       = 1,
   color_icons      = true,
   git_icons        = false,
@@ -938,16 +1079,21 @@ M.defaults.lsp.code_actions     = {
 }
 
 M.defaults.diagnostics          = {
-  previewer   = M._default_previewer_fn,
-  file_icons  = 1,
-  color_icons = true,
-  git_icons   = false,
-  diag_icons  = true,
-  diag_source = false,
-  multiline   = true,
-  fzf_opts    = { ["--multi"] = true },
-  _actions    = function() return M.globals.actions.files end,
-  _cached_hls = { "path_colnr", "path_linenr" },
+  previewer      = M._default_previewer_fn,
+  file_icons     = false,
+  color_icons    = true,
+  color_headings = true,
+  git_icons      = false,
+  diag_icons     = true,
+  diag_source    = true,
+  diag_code      = true,
+  multiline      = 2,
+  fzf_opts       = {
+    ["--multi"] = true,
+    ["--wrap"]  = true,
+  },
+  _actions       = function() return M.globals.actions.files end,
+  _cached_hls    = { "path_colnr", "path_linenr" },
   -- signs = {
   --   ["Error"] = { text = "e", texthl = "DiagnosticError" },
   --   ["Warn"]  = { text = "w", texthl = "DiagnosticWarn" },
@@ -986,8 +1132,10 @@ M.defaults.marks                = {
 }
 
 M.defaults.changes              = {
-  cmd = "changes",
-  h1 = "change",
+  cmd       = "changes",
+  h1        = "change",
+  actions   = { ["enter"] = actions.goto_jump },
+  previewer = { _ctor = previewers.builtin.jumps },
 }
 
 M.defaults.jumps                = {
@@ -1008,30 +1156,36 @@ M.defaults.tagstack             = {
 
 M.defaults.commands             = {
   actions         = { ["enter"] = actions.ex_run },
+  flatten         = {},
   include_builtin = true,
 }
 
 M.defaults.autocmds             = {
+  show_desc = true,
   previewer = { _ctor = previewers.builtin.autocmds },
   _actions  = function() return M.globals.actions.files end,
   fzf_opts  = {
-    ["--delimiter"] = "[|]",
+    ["--delimiter"] = "[│]",
     ["--with-nth"]  = "2..",
     ["--no-multi"]  = true,
   },
 }
 
 M.defaults.command_history      = {
-  fzf_opts = { ["--tiebreak"] = "index", ["--no-multi"] = true },
-  actions  = {
+  fzf_opts    = { ["--tiebreak"] = "index", ["--no-multi"] = true },
+  _treesitter = function(line) return "foo.vim", nil, line end,
+  fzf_colors  = { ["hl"] = "-1:reverse", ["hl+"] = "-1:reverse" },
+  actions     = {
     ["enter"]  = actions.ex_run_cr,
     ["ctrl-e"] = actions.ex_run,
   },
 }
 
 M.defaults.search_history       = {
-  fzf_opts = { ["--tiebreak"] = "index", ["--no-multi"] = true },
-  actions  = {
+  fzf_opts    = { ["--tiebreak"] = "index", ["--no-multi"] = true },
+  _treesitter = function(line) return "", nil, line, "regex" end,
+  fzf_colors  = { ["hl"] = "-1:reverse", ["hl+"] = "-1:reverse" },
+  actions     = {
     ["enter"]  = actions.search_cr,
     ["ctrl-e"] = actions.search,
   },
@@ -1083,7 +1237,7 @@ M.defaults.spell_suggest        = {
     width    = 0.30,
   },
   actions = {
-    ["enter"] = actions.spell_apply,
+    ["enter"] = actions.complete,
   },
 }
 
@@ -1138,7 +1292,8 @@ M.defaults.complete_path        = {
   file_icons        = false,
   git_icons         = false,
   color_icons       = true,
-  multiprocess      = true,
+  multiprocess      = 1,
+  _type             = "file",
   word_pattern      = nil,
   fzf_opts          = { ["--no-multi"] = true },
   _fzf_nth_devicons = true,
@@ -1147,7 +1302,8 @@ M.defaults.complete_path        = {
 
 M.defaults.complete_file        = {
   cmd               = nil, -- default: auto detect rg|fd|find
-  multiprocess      = true,
+  multiprocess      = 1,
+  _type             = "file",
   file_icons        = 1,
   color_icons       = true,
   git_icons         = false,
@@ -1161,18 +1317,21 @@ M.defaults.complete_file        = {
 }
 
 M.defaults.zoxide               = {
-  multiprocess = true,
-  cmd          = "zoxide query --list --score",
-  git_root     = false,
-  formatter    = "path.dirname_first",
-  fzf_opts     = {
+  multiprocess  = true,
+  fn_transform  = [[return require("fzf-lua.make_entry").zoxide]],
+  fn_preprocess = [[nil]],
+  cmd           = "zoxide query --list --score",
+  git_root      = false,
+  formatter     = "path.dirname_first",
+  fzf_opts      = {
     ["--no-multi"]  = true,
     ["--delimiter"] = "[\t]",
     ["--tabstop"]   = "4",
     ["--tiebreak"]  = "end,index",
     ["--nth"]       = "2..",
+    ["--no-sort"]   = true, -- sort by score
   },
-  actions      = { enter = actions.cd }
+  actions       = { enter = actions.cd }
 }
 
 M.defaults.complete_line        = { complete = true }

@@ -18,16 +18,18 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        rev: [nightly, v0.10.3]
+        rev: [nightly, v0.11.3]
         include:
           - os: macos-latest
-            install-deps: brew update && brew install fzf ripgrep fd
+            install-deps: |
+              brew update && brew install fzf ripgrep fd gnu-getopt
+              brew link --force gnu-getopt
           - os: windows-latest
             install-deps: choco install fzf ripgrep fd
           - os: ubuntu-latest
             install-deps: |
               sudo apt-get update && sudo apt-get install -y ripgrep fd-find
-              wget -O - https://github.com/junegunn/fzf/releases/download/v0.58.0/fzf-0.58.0-linux_amd64.tar.gz | tar zxfv -
+              wget -O - https://github.com/junegunn/fzf/releases/download/v0.64.0/fzf-0.64.0-linux_amd64.tar.gz | tar zxfv -
               sudo mv ./fzf /bin
 
     steps:

@@ -1,3 +1,4 @@
+---@diagnostic disable: inject-field
 -- lcd so we can run current file even if cwd isn't fzf-lua
 local __FILE__ = debug.getinfo(1, "S").source:gsub("^@", "")
 vim.cmd.lcd(vim.fn.fnamemodify(__FILE__, ":p:h:h:h:h"))
@@ -35,8 +36,8 @@ local os_detect = {
   },
   MAC = { name = "MacOS", fn = function() return vim.fn.has("mac") == 1 end },
   LINUX = { name = "Linux", fn = function() return vim.fn.has("linux") == 1 end },
-  STABLE = { name = "Neovim stable", fn = function() return M.NVIM_VERSION() == "0.10.3" end },
-  NIGHTLY = { name = "Neovim nightly", fn = function() return vim.fn.has("nvim-0.11") == 1 end },
+  STABLE = { name = "Neovim stable", fn = function() return M.NVIM_VERSION() == "0.11.3" end },
+  NIGHTLY = { name = "Neovim nightly", fn = function() return vim.fn.has("nvim-0.12") == 1 end },
 }
 
 -- Creates M.IS_WIN(), M.IS_NOT_WIN(), M.SKIP_IF_WIN(), etc
@@ -133,12 +134,18 @@ M.new_child_neovim = function()
         %s
         winopts = {
           on_create = function() _G._fzf_lua_on_create = true end,
-          on_close = function() _G._fzf_lua_on_create = nil end,
+          on_close = function()
+            _G._fzf_lua_on_create = nil
+            _G._fzf_postprocess_called = nil
+            _G._fzf_load_called = nil
+          end,
         },
-        keymap = { fzf = {
-          true,
-          load = function() _G._fzf_load_called = true end,
-        } }
+        -- Using _fzf_cli_args so we can test keymap.fzf.load actions.load (api.events)
+        -- keymap = { fzf = { true, load = function() _G._fzf_load_called = true end } }
+        fzf_cli_args = "--bind=" .. FzfLua.libuv.shellescape("load:+execute-silent:"
+          .. FzfLua.shell.stringify_data(function(_, _, _)
+              _G._fzf_load_called = true
+            end, {}))
       }))
     ]])
         -- using "FZF_DEFAULT_OPTS" hangs the command on the
@@ -151,7 +158,13 @@ M.new_child_neovim = function()
   child.unload = function()
     -- Unload Lua module
     child.lua([[_G.FzfLua = nil]])
-    child.lua([[package.loaded["fzf-lua"] = nil]])
+    child.lua([[
+      for k, v in pairs(package.loaded) do
+        if k:match("^fzf%-lua") then
+          package.loaded[k] = nil
+        end
+      end
+    ]])
 
     -- Remove global vars
     for _, var in ipairs({ "server", "directory", "root" }) do
@@ -231,6 +244,10 @@ M.new_child_neovim = function()
     MiniTest.expect.reference_screenshot(child.get_screenshot(screenshot_opts), path, opts)
   end
 
+  ---@alias test.ScreenOpts { start_line: integer?, end_line: integer?, no_ruler: boolean?,
+  ---normalize_paths: boolean?, redraw: boolean? }
+  ---@param opts test.ScreenOpts
+  ---@return MiniTestScreenshot
   child.get_screen_lines = function(opts)
     return screenshot.fromChildScreen(child, opts)
   end
@@ -238,31 +255,62 @@ M.new_child_neovim = function()
   -- Expect screenshot without the "attrs" (highlights)
   child.expect_screen_lines = function(opts, path)
     opts = opts or {}
-    local screenshot_opts = { redraw = opts.redraw, normalize_paths = opts.normalize_paths }
+    ---@type test.ScreenOpts
+    local screenshot_opts = {
+      redraw = opts.redraw,
+      normalize_paths = opts.normalize_paths,
+      start_line = opts.start_line,
+      end_line = opts.end_line,
+      no_ruler = opts.no_ruler,
+    }
     opts.redraw = nil
     opts.force = not not vim.env["update_screenshots"]
-    MiniTest.expect.reference_screenshot(child.get_screen_lines(screenshot_opts), path, opts)
+    screenshot.reference_screenshot(child.get_screen_lines(screenshot_opts), path, opts)
   end
 
+  ---@param opts test.ScreenOpts
+  ---@param buf integer
+  ---@return MiniTestScreenshot
   child.get_buf_lines = function(buf, opts)
     return screenshot.fromChildBufLines(child, buf, opts)
   end
 
   child.expect_buflines = function(buf, opts, path)
     opts = opts or {}
-    local screenshot_opts = { redraw = opts.redraw, normalize_paths = opts.normalize_paths }
+    ---@type test.ScreenOpts
+    local screenshot_opts = {
+      redraw = opts.redraw,
+      normalize_paths = opts.normalize_paths,
+      start_line = opts.start_line,
+      end_line = opts.end_line,
+      no_ruler = opts.no_ruler,
+    }
     opts.redraw = nil
     opts.force = not not vim.env["update_screenshots"]
-    MiniTest.expect.reference_screenshot(child.get_buf_lines(buf, screenshot_opts), path, opts)
+    screenshot.reference_screenshot(child.get_buf_lines(buf, screenshot_opts), path, opts)
   end
 
+  ---@param str string
+  ---@param opts test.ScreenOpts
+  child.assert_screen_lines = function(str, opts)
+    opts = opts or {}
+    -- we don't need this if we compare inline
+    opts.no_ruler = true
+    local lines = str and vim.split(str, "\n") or { "" }
+    if #lines > 1 then lines[#lines] = nil end
+    local screen_ref = screenshot.from_lines(lines, opts)
+    local screen_obs = child.get_screen_lines(opts)
+    screenshot.compare(screen_ref, screen_obs, opts)
+  end
+
+  local wait_timeout = (M.IS_LINUX() and 2000 or 5000)
   --- waits until condition fn evals to true, checking every interval ms
   --- times out at timeout ms
   ---@param condition fun(): boolean
   ---@param timeout? integer, defaults to 2000
   ---@param interval? integer, defaults to 100
   child.wait_until = function(condition, timeout, interval)
-    local max = timeout or 2000
+    local max = timeout or wait_timeout
     local inc = interval or 100
     for _ = 0, max, inc do
       if condition() then
@@ -327,13 +375,13 @@ M.new_set_with_child = function(child, opts, setup_opts)
         if opts.hooks.post_case then
           opts.hooks.post_case()
         end
-        child.unload()
+        pcall(child.unload) -- job may already die
       end,
       post_once = function()
         if opts.hooks.post_once then
           opts.hooks.post_once()
         end
-        child.stop()
+        pcall(child.stop) -- job may already die
       end,
     },
     -- n_retry = helpers.get_n_retry(2),
@@ -344,5 +392,109 @@ M.sleep = function(ms, child)
   vim.uv.sleep(math.max(ms, 1))
   if child ~= nil then child.poke_eventloop() end
 end
+
+--- Helper object to run fzf-lua API's via a child process and expect a screenshot
+--- e.g. helpers.FzfLua.files({...}) or helpers.FzfLua.fzf_exec(contents, {...})
+M.FzfLua = setmetatable({}, {
+  __index = function(_, api)
+    return function(child, ...)
+      local serpent = require "fzf-lua.lib.serpent"
+      local eq = M.expect.equality
+      local args = { ... }
+
+      -- When using `fzf_exec` opts are at index[2], or otherwise at index[1]
+      -- remove index[1] into "contents" so index[1] is always our "opts"
+      local contents = (api == "fzf_exec" or api == "fzf_live")
+          and (table.remove(args, 1) .. ",") or ""
+
+      -- Split "opts" and "ci_opts" which are double underscore prefixed
+      local opts, ci_opts = (function()
+        local o, ci_o = {}, {}
+        for k, v in pairs(args[1] or {}) do
+          if k:match("^__") then
+            ci_o[k] = v
+          else
+            o[k] = v
+          end
+        end
+        return o, ci_o
+      end)()
+
+      -- Override args[1] with stripped opts (excluding ci_opts)
+      args[1] = opts
+
+      -- Added addittional wait for `fn_postprocess` due to #1914, proved to be flakey
+      -- on MacOs but I actually like it that we're testing `fn_postprocess` as well as
+      -- RPC connection from child to main instance using with `_G._fzf_lua_server`
+      if ci_opts.__postprocess_wait then
+        opts.fn_postprocess = opts.multiprocess
+            and [[return function(opts)
+              local chan_id = vim.fn.sockconnect("pipe", _G._fzf_lua_server, { rpc = true })
+              vim.rpcrequest(chan_id, "nvim_exec_lua", "_G._fzf_postprocess_called=true", {})
+              vim.fn.chanclose(chan_id)
+            end]]
+            or [[return function(_) _G._fzf_postprocess_called = true end]]
+      end
+
+      -- Stringify supplied opts
+      local serlialized = serpent.block(args, { comment = false, sortkeys = false })
+
+      -- HACK: test previewer needs to be unquoted
+      serlialized = serlialized:gsub([[(")(require%(.-%))(")]], "%2")
+      -- print("c", contents, "o", serlialized)
+
+      -- Verify postprocess var is nil before opening fzf-lua
+      eq(child.lua_get([[_G._fzf_postprocess_called]]), vim.NIL)
+
+      -- Open fzf-lua with args, can open both fzf_exec and files, grep, etc
+      child.lua(string.format("FzfLua.%s(%sunpack(%s))", api, contents, serlialized))
+
+      -- Verify `winopts.on_create` was called
+      eq(child.lua_get([[_G._fzf_lua_on_create]]), true)
+
+      -- Wait for fzf's "load" event
+      child.wait_until(function()
+        return child.lua_get([[_G._fzf_load_called]]) == true
+      end)
+
+      -- If requested, wait for `fn_postprocess` to be calleed
+      if ci_opts.__postprocess_wait then
+        if M.IS_MAC() then
+          vim.uv.sleep(200)
+        else
+          child.wait_until(function()
+            return child.lua_get([[_G._fzf_postprocess_called]]) == true
+          end)
+        end
+      end
+
+      -- Call the "after open" callback (set by some tests)
+      if type(ci_opts.__after_open) == "function" then
+        ci_opts.__after_open()
+      end
+
+      -- Ignore last "-- TERMINAL --" line and paths on Windows (separator is "\")
+      local screen_opts = ci_opts.__screen_opts
+          or { ignore_text = { 28 }, normalize_paths = M.IS_WIN() }
+
+      if ci_opts.__expect_lines then
+        -- Compare screen lines without "attrs" so we can test on
+        -- stable, nightly and windows
+        child.expect_screen_lines(screen_opts)
+      else
+        -- Compare screenshots including attrs (highlights, etc)
+        child.expect_screenshot(screen_opts)
+      end
+
+      -- Feed the abort key and exit fzf
+      child.type_keys(ci_opts.__abort_key or "<c-c>")
+
+      -- Wait for `winopts.on_close` to be called
+      child.wait_until(function()
+        return child.lua_get([[_G._fzf_lua_on_create]]) == vim.NIL
+      end)
+    end
+  end
+})
 
 return M

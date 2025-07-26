@@ -98,7 +98,7 @@ M.ui_select = function(items, ui_opts, on_choice)
 
   -- Force override prompt or it stays cached (#786)
   local prompt = ui_opts.prompt or "Select one of:"
-  opts.prompt = prompt:gsub(":%s?$", "> ")
+  opts.prompt = opts.prompt or prompt:gsub(":%s?$", "> ")
 
   -- save items so we can access them from the action
   opts._items = items
@@ -151,7 +151,9 @@ M.ui_select = function(items, ui_opts, on_choice)
   -- inherit from defaults if not triggered by lsp_code_actions
   local opts_merge_strategy = "keep"
   if not _OPTS_ONCE and ui_opts.kind == "codeaction" then
+    ---@type fzf-lua.config.LspCodeActions
     _OPTS_ONCE = config.normalize_opts({}, "lsp.code_actions")
+    if not _OPTS_ONCE then return end
     -- auto-detected code actions, prioritize the ui_select
     -- options over `lsp.code_actions` (#999)
     opts_merge_strategy = "force"
@@ -172,12 +174,13 @@ M.ui_select = function(items, ui_opts, on_choice)
     opts.cb_co = (function()
       -- NOTE: use clojure  as `_OPTS_ONCE` is otherwise nullified
       local opts_once_ref = _OPTS_ONCE
+      ---@diagnostic disable-next-line: inject-field
       return function(co) opts_once_ref._co = co end
     end)()
     _OPTS_ONCE = nil
   end
 
-  core.fzf_exec(entries, opts)
+  return core.fzf_exec(entries, opts)
 end
 
 return M

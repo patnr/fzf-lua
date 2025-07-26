@@ -2,7 +2,7 @@
 
 # fzf :heart: lua
 
-![Neovim version](https://img.shields.io/badge/Neovim-0.7-57A143?style=flat-square&logo=neovim)
+![Neovim version](https://img.shields.io/badge/Neovim-0.9-57A143?style=flat-square&logo=neovim)
 
 [Quickstart](#quickstart) • [Installation](#installation) • [Usage](#usage) • [Commands](#commands) • [Customization](#customization) • [Wiki](https://github.com/ibhagwan/fzf-lua/wiki)
 
@@ -55,8 +55,8 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim)
 
 ### Dependencies
 
-- [`neovim`](https://github.com/neovim/neovim/releases) version > `0.7.0`
-- [`fzf`](https://github.com/junegunn/fzf) version > `0.25`
+- [`neovim`](https://github.com/neovim/neovim/releases) version >= `0.9`
+- [`fzf`](https://github.com/junegunn/fzf) version > `0.36`
   or [`skim`](https://github.com/skim-rs/skim) binary installed
 - [nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons)
   or [mini.icons](https://github.com/echasnovski/mini.icons)
@@ -86,6 +86,11 @@ to configure in `previewer.builtin.extensions`):
 - [viu](https://github.com/atanunq/viu) - terminal image previewer
 - [ueberzugpp](https://github.com/jstkdng/ueberzugpp) - terminal image previewer using X11/Wayland
   child windows, sixels, kitty and iterm2
+
+> [!TIP]
+> If your terminal supports the kitty graphics protocol (e.g. kitty, ghostty, etc) install
+> @folke's [snacks.nvim](https://github.com/folke/snacks.nvim) to render images using the
+> `snacks.image` module, it will be auto-detected by fzf-lua and requires no configuration.
 
 ### Windows Notes
 
@@ -118,7 +123,8 @@ run any fzf-lua command like this:
 or with arguments:
 
 ```lua
-:lua require('fzf-lua').files({ cwd = '~/.config' })
+-- Once fzf-lua is loaded you can also use the lua global `_G.FzfLua`
+:lua FzfLua.files({ cwd = '~/.config' })
 -- or using the `FzfLua` vim command:
 :FzfLua files cwd=~/.config
 ```
@@ -128,7 +134,7 @@ or with arguments:
 Resuming work from where you left off is as easy as:
 
 ```lua
-:lua require('fzf-lua').resume()
+:lua FzfLua.resume()
 -- or
 :FzfLua resume
 ```
@@ -136,7 +142,7 @@ Resuming work from where you left off is as easy as:
 Alternatively, resuming work on a specific picker:
 
 ```lua
-:lua require('fzf-lua').files({ resume = true })
+:lua FzfLua.files({ resume = true })
 -- or
 :FzfLua files resume=true
 ```
@@ -156,6 +162,40 @@ Alternatively, resuming work on a specific picker:
 >   -- your other settings here 
 > })
 > ```
+
+### Combining Pickers
+
+Fzf-Lua can combine any of the available pickers into a single display
+using the `combine` method, for example file history (oldfiles) and
+git-files:
+```lua
+:lua FzfLua.combine({ pickers = "oldfiles;git_files" })
+-- or using the `FzfLua` vim command:
+:FzfLua combine pickers=oldfiles;git_files
+```
+
+> [!NOTE]
+> The first picker options determine the options used by the combined
+> picker, that includes formatters, previewer, path_shorten, etc.
+> To avoid errors combine only pickers of the same entry types (i.e files)
+
+### Global Picker
+
+Fzf-Lua conveniently comes with a VS-Code like picker by default
+(customizable) combining files, buffers and LSP symbols:
+
+|Prefix     |Behavior                           |
+|-----------|-----------------------------------|
+|`no prefix`|Files                              |
+|`$`        |Buffers                            |
+|`@`        |LSP Symbols (current buffer)       |
+|`#`        |LSP Symbols (workspace/project)    |
+
+```lua
+:lua FzfLua.global()
+-- or using the `FzfLua` vim command:
+:FzfLua global
+```
 
 **LIST OF AVAILABLE COMMANDS BELOW** 👇
 
@@ -232,6 +272,8 @@ Alternatively, resuming work on a specific picker:
 | -------------- | ------------------------ |
 | `git_files`    | `git ls-files`           |
 | `git_status`   | `git status`             |
+| `git_diff`     | `git diff {ref}`         |
+| `git_hunks`    | `git hunks {ref}`        |
 | `git_commits`  | git commit log (project) |
 | `git_bcommits` | git commit log (buffer)  |
 | `git_blame`    | git blame (buffer)       |
@@ -270,31 +312,34 @@ Alternatively, resuming work on a specific picker:
 
 ### Misc
 
-| Command                | List                           |
-| ---------------------- | ------------------------------ |
-| `resume`               | resume last command/query      |
-| `builtin`              | fzf-lua builtin commands       |
-| `profiles`             | fzf-lua configuration profiles |
-| `helptags`             | help tags                      |
-| `manpages`             | man pages                      |
-| `colorschemes`         | color schemes                  |
-| `awesome_colorschemes` | Awesome Neovim color schemes   |
-| `highlights`           | highlight groups               |
-| `commands`             | neovim commands                |
-| `command_history`      | command history                |
-| `search_history`       | search history                 |
-| `marks`                | :marks                         |
-| `jumps`                | :jumps                         |
-| `changes`              | :changes                       |
-| `registers`            | :registers                     |
-| `tagstack`             | :tags                          |
-| `autocmds`             | :autocmd                       |
-| `nvim_options`         | neovim options                 |
-| `keymaps`              | key mappings                   |
-| `filetypes`            | filetypes                      |
-| `menus`                | menus                          |
-| `spell_suggest`        | spelling suggestions           |
-| `packadd`              | :packadd <package>             |
+| Command                | List                                          |
+| ---------------------- | --------------------------------------------- |
+| `resume`               | resume last command/query                     |
+| `builtin`              | fzf-lua builtin commands                      |
+| `combine`              | combine different fzf-kua pickers             |
+| `global`               | global picker for files,buffers and symbols   |
+| `profiles`             | fzf-lua configuration profiles                |
+| `helptags`             | help tags                                     |
+| `manpages`             | man pages                                     |
+| `colorschemes`         | color schemes                                 |
+| `awesome_colorschemes` | Awesome Neovim color schemes                  |
+| `highlights`           | highlight groups                              |
+| `commands`             | neovim commands                               |
+| `command_history`      | command history                               |
+| `search_history`       | search history                                |
+| `marks`                | :marks                                        |
+| `jumps`                | :jumps                                        |
+| `changes`              | :changes                                      |
+| `registers`            | :registers                                    |
+| `tagstack`             | :tags                                         |
+| `autocmds`             | :autocmd                                      |
+| `nvim_options`         | neovim options                                |
+| `keymaps`              | key mappings                                  |
+| `filetypes`            | filetypes                                     |
+| `menus`                | menus                                         |
+| `spellcheck`           | misspelled words in buffer                    |
+| `spell_suggest`        | spelling suggestions                          |
+| `packadd`              | :packadd <package>                            |
 
 </details>
 <details>
@@ -715,7 +760,7 @@ previewers = {
       -- from being modified when toggling the preview.
       toggle_behavior = "default",
       -- Title transform function, by default only displays the tail
-      -- title_fnamemodify = function(s) vim.fn.fnamemodify(s, ":t") end,
+      -- title_fnamemodify = function(s) return vim.fn.fnamemodify(s, ":t") end,
       -- preview extensions using a custom shell command:
       -- for example, use `viu` for image previews
       -- will do nothing if `viu` isn't executable
@@ -733,11 +778,10 @@ previewers = {
       --   "contain", "forced_cover", "cover"
       -- https://github.com/seebye/ueberzug
       ueberzug_scaler = "cover",
-      -- Custom filetype autocmds aren't triggered on
-      -- the preview buffer, define them here instead
-      -- ext_ft_override = { ["ksql"] = "sql", ... },
       -- render_markdown.nvim integration, enabled by default for markdown
       render_markdown = { enabled = true, filetypes = { ["markdown"] = true } },
+      -- snacks.images integration, enabled by default
+      snacks_image = { enabled = true, render_inline = true },
     },
     -- Code Action previewers, default is "codeaction" (set via `lsp.code_actions.previewer`)
     -- "codeaction_native" uses fzf's native previewer, recommended when combined with git-delta
@@ -846,6 +890,27 @@ previewers = {
       --   ["ctrl-x"]  = { fn = actions.git_reset, reload = true },
       --   ["ctrl-s"]  = { fn = actions.git_stage_unstage, reload = true },
       -- },
+    },
+    diff = {
+      cmd               = "git --no-pager diff --name-only {ref}",
+      ref               = "HEAD",
+      preview           = "git diff {ref} {file}",
+      -- git-delta is automatically detected as pager, uncomment to disable
+      -- preview_pager = false,
+      file_icons        = true,
+      color_icons       = true,
+      fzf_opts          = { ["--multi"] = true },
+    },
+    hunks = {
+      cmd               = "git --no-pager diff --color=always {ref}",
+      ref               = "HEAD",
+      file_icons        = true,
+      color_icons       = true,
+      fzf_opts          = {
+      ["--multi"] = true,
+      ["--delimiter"] = ":",
+      ["--nth"] = "3..",
+      },
     },
     commits = {
       prompt        = 'Commits❯ ',
@@ -1029,6 +1094,7 @@ previewers = {
     prompt            = 'Tabs❯ ',
     tab_title         = "Tab",
     tab_marker        = "<<",
+    locate            = true,         -- position cursor at current window
     file_icons        = true,         -- show file icons (true|"devicons"|"mini")?
     color_icons       = true,         -- colorize file|git icons
     actions = {
@@ -1145,7 +1211,7 @@ previewers = {
   },
   quickfix = {
     file_icons        = true,
-    only_valid        = false, -- select among only the valid quickfix entries
+    valid_only        = false, -- select among only the valid quickfix entries
   },
   quickfix_stack = {
     prompt = "Quickfix Stack> ",
@@ -1167,6 +1233,7 @@ previewers = {
     symbols = {
         -- lsp_query      = "foo"       -- query passed to the LSP directly
         -- query          = "bar"       -- query passed to fzf prompt for fuzzy matching
+        locate            = false,      -- attempt to position cursor at current symbol
         async_or_timeout  = true,       -- symbols are async by default
         symbol_style      = 1,          -- style for document/workspace symbols
                                         -- false: disable,    1: icon+kind
@@ -1245,12 +1312,14 @@ previewers = {
   diagnostics ={
     prompt            = 'Diagnostics❯ ',
     cwd_only          = false,
-    file_icons        = true,
+    file_icons        = false,
     git_icons         = false,
-    diag_icons        = true,
+    color_headings    = true,   -- use diag highlights to color source & filepath
+    diag_icons        = true,   -- display icons from diag sign definitions
     diag_source       = true,   -- display diag source (e.g. [pycodestyle])
+    diag_code         = true,   -- display diag code (e.g. [undefined])
     icon_padding      = '',     -- add padding for wide diagnostics signs
-    multiline         = true,   -- concatenate multi-line diags into a single line
+    multiline         = 2,      -- split heading and diag to separate lines
     -- severity_only:   keep any matching exact severity
     -- severity_limit:  keep any equal or more severe (lower)
     -- severity_bound:  keep any equal or less severe (higher)
@@ -1312,7 +1381,7 @@ previewers = {
 Different `fzf` layout:
 
 ```lua
-:lua require('fzf-lua').files({ fzf_opts = {['--layout'] = 'reverse-list'} })
+:lua FzfLua.files({ fzf_opts = {['--layout'] = 'reverse-list'} })
 -- Or via the vimL command
 :FzfLua files fzf_opts.--layout=reverse-list
 ```
@@ -1320,7 +1389,7 @@ Different `fzf` layout:
 Using `files` with a different command and working directory:
 
 ```lua
-:lua require'fzf-lua'.files({ prompt="LS> ", cmd = "ls", cwd="~/.config" })
+:lua FzfLua.files({ prompt="LS> ", cmd = "ls", cwd="~/.config" })
 -- Or via the vimL command
 :FzfLua files prompt="LS>\ " cmd=ls cwd=~/.config
 ```
@@ -1498,7 +1567,7 @@ require('fzf-lua').setup {
 
 or temporarily in the call:
 ```lua
-:lua require'fzf-lua'.files({ hls={preview_title="IncSearch"} })
+:lua FzfLua.files({ hls={preview_title="IncSearch"} })
 -- vimL equivalent
 :FzfLua files hls.preview_title=IncSearch
 ```
@@ -1580,7 +1649,7 @@ your current Neovim colorscheme:
 ```lua
 require("fzf-lua").setup({ fzf_colors = true })
 -- Or in the direct call options
-:lua require("fzf-lua").files({ fzf_colors = true })
+:lua FzfLua.files({ fzf_colors = true })
 :FzfLua files fzf_colors=true
 ```
 

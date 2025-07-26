@@ -128,19 +128,30 @@ M.act = function(selected, opts)
 end
 
 -- Dummy abort action for `esc|ctrl-c|ctrl-q`
-M.dummy_abort = function()
+M.dummy_abort = function(_, o)
+  -- try to resume mode if `complete` is set
+  if o.complete and o.__CTX.mode == "i" then
+    vim.cmd [[noautocmd lua vim.api.nvim_feedkeys('i', 'n', true)]]
+  end
 end
 
 M.resume = function(_, _)
-  -- call via loadstring to prevent a circular ref
-  loadstring([[require("fzf-lua").resume()]])()
+  require("fzf-lua").resume()
 end
 
+---@param _vimcmd string
+---@param selected string[]
+---@param opts fzf-lua.Config
+---@param pcall_vimcmd boolean?
+---@return string?
 M.vimcmd_entry = function(_vimcmd, selected, opts, pcall_vimcmd)
   for i, sel in ipairs(selected) do
     (function()
       -- Lua 5.1 goto compatiblity hack (function wrap)
       local entry = path.entry_to_file(sel, opts, opts._uri)
+      -- if enabled, query can contain line no, e.g. "file:40"
+      local lnum = opts.line_query and tonumber(opts.last_query:match(":(%d+)$"))
+      entry.line = lnum or entry.line
       -- "<none>" could be set by `autocmds`
       if entry.path == "<none>" then return end
       local fullpath = entry.bufname or entry.uri and entry.uri:match("^%a+://(.*)") or entry.path
@@ -211,7 +222,8 @@ M.vimcmd_entry = function(_vimcmd, selected, opts, pcall_vimcmd)
           -- Force full paths when `autochdir=true` (#882)
           vimcmd = string.format("%s %s", vimcmd, (function()
             -- `:argdel|:argadd` uses only paths
-            if vimcmd:match("^arg") then return entry.path end
+            -- argdel only accepts relative path (#1949)
+            if vimcmd:match("^arg") then return path.relative_to(entry.path, uv.cwd()) end
             if entry.bufnr then return tostring(entry.bufnr) end
             -- We normalize the path or Windows will fail with directories starting
             -- with special characters, for example "C:\app\(web)" will be translated
@@ -221,7 +233,7 @@ M.vimcmd_entry = function(_vimcmd, selected, opts, pcall_vimcmd)
         end
         if pcall_vimcmd ~= false then
           local ok, err = pcall(function() vim.cmd(vimcmd) end)
-          if not ok then utils.warn(string.format("':%s' failed: %s", vimcmd, err)) end
+          if not ok then utils.error("':%s' failed: %s", vimcmd, err) end
         else
           vim.cmd(vimcmd)
         end
@@ -234,9 +246,9 @@ M.vimcmd_entry = function(_vimcmd, selected, opts, pcall_vimcmd)
       if entry.uri then
         if utils.is_term_bufname(entry.uri) then
           -- nvim_exec2(): Vim(normal):Can't re-enter normal mode from terminal mode
-          pcall(utils.jump_to_location, entry, "utf-16")
+          pcall(utils.jump_to_location, entry, "utf-16", opts.reuse_win)
         else
-          utils.jump_to_location(entry, "utf-16")
+          utils.jump_to_location(entry --[[@as lsp.Location]], "utf-16", opts.reuse_win)
         end
       elseif entry.ctag and entry.line == 0 then
         vim.api.nvim_win_set_cursor(0, { 1, 0 })
@@ -308,8 +320,9 @@ local sel_to_qf = function(selected, opts, is_loclist)
       return a.filename < b.filename
     end
   end)
-  local title = string.format("[FzfLua] %s%s",
-    opts.__INFO and opts.__INFO.cmd .. ": " or "",
+
+  local cmd = utils.get_info().cmd
+  local title = string.format("[FzfLua] %s%s", cmd and cmd .. ": " or "",
     utils.resume_get("query", opts) or "")
   if is_loclist then
     vim.fn.setloclist(0, {}, " ", {
@@ -325,7 +338,7 @@ local sel_to_qf = function(selected, opts, is_loclist)
   else
     -- Set the quickfix title to last query and
     -- append a new list to end of the stack (#635)
-    vim.fn.setqflist({}, " ", {
+    vim.fn.setqflist({}, " ", { ---@diagnostic disable-next-line: assign-type-mismatch
       nr = "$",
       items = qf_list,
       title = title,
@@ -336,6 +349,33 @@ local sel_to_qf = function(selected, opts, is_loclist)
     elseif opts.copen ~= false then
       vim.cmd(opts.copen or "botright copen")
     end
+  end
+end
+
+M.list_del = function(selected, opts)
+  local winid = opts.__CTX.winid
+  local list = opts.is_loclist and vim.fn.getloclist(winid) or vim.fn.getqflist()
+
+  local buf_del = (function()
+    local ret = {}
+    for _, s in ipairs(selected) do
+      local b = s:match("%[(%d+)%]")
+      ret[b] = true
+    end
+    return ret
+  end)()
+
+  local newlist = {}
+  for _, l in ipairs(list) do
+    if not buf_del[tostring(l.bufnr)] then
+      table.insert(newlist, l)
+    end
+  end
+
+  if opts.is_loclist then
+    vim.fn.setloclist(winid, newlist, "r")
+  else
+    vim.fn.setqflist(newlist, "r")
   end
 end
 
@@ -431,6 +471,8 @@ end
 M.arg_add = function(selected, opts)
   local vimcmd = "argadd"
   M.vimcmd_entry(vimcmd, selected, opts)
+  ---@diagnostic disable-next-line: param-type-mismatch
+  pcall(vim.cmd, "argdedupe")
 end
 
 M.arg_del = function(selected, opts)
@@ -441,6 +483,7 @@ M.arg_del = function(selected, opts)
 end
 
 M.colorscheme = function(selected, opts)
+  if #selected == 0 then return end
   local dbkey, idx = selected[1]:match("^(.-):(%d+):")
   if dbkey then
     opts._apply_awesome_theme(dbkey, idx, opts)
@@ -471,34 +514,45 @@ end
 M.toggle_bg = function(_, _)
   vim.o.background = vim.o.background == "dark" and "light" or "dark"
   utils.setup_highlights()
-  utils.info(string.format([[background set to "%s"]], vim.o.background))
+  utils.info([[background set to '%s']], vim.o.background)
+end
+
+M.hi = function(selected)
+  if #selected == 0 then return end
+  vim.cmd("hi " .. selected[1])
+  vim.cmd("echo")
 end
 
 M.run_builtin = function(selected)
+  if #selected == 0 then return end
   local method = selected[1]
-  pcall(loadstring(string.format("require'fzf-lua'.%s()", method)))
+  pcall(require "fzf-lua"[method])
 end
 
 M.ex_run = function(selected)
+  if #selected == 0 then return end
   local cmd = selected[1]
   vim.cmd("stopinsert")
-  vim.fn.feedkeys(string.format(":%s", cmd), "n")
+  vim.fn.feedkeys(string.format(":%s", cmd), "nt")
   return cmd
 end
 
 M.ex_run_cr = function(selected)
+  if #selected == 0 then return end
   local cmd = selected[1]
   vim.cmd(cmd)
   vim.fn.histadd("cmd", cmd)
 end
 
 M.exec_menu = function(selected)
+  if #selected == 0 then return end
   local cmd = selected[1]
   vim.cmd("emenu " .. cmd)
 end
 
 
 M.search = function(selected, opts)
+  if #selected == 0 then return end
   local query = selected[1]
   vim.cmd("stopinsert")
   vim.fn.feedkeys(
@@ -512,6 +566,7 @@ M.search_cr = function(selected, opts)
 end
 
 M.goto_mark = function(selected)
+  if #selected == 0 then return end
   local mark = selected[1]
   mark = mark:match("[^ ]+")
   vim.cmd("stopinsert")
@@ -533,6 +588,7 @@ M.mark_del = function(selected)
 end
 
 M.goto_jump = function(selected, opts)
+  if #selected == 0 then return end
   if opts.jump_using_norm then
     local jump, _, _, _ = selected[1]:match("(%d+)%s+(%d+)%s+(%d+)%s+(.*)")
     if tonumber(jump) then
@@ -557,6 +613,7 @@ M.goto_jump = function(selected, opts)
 end
 
 M.keymap_apply = function(selected)
+  if #selected == 0 then return end
   -- extract lhs in the keymap. The lhs can't contain a whitespace.
   local key = selected[1]:match("[│]%s+([^%s]*)%s+[│]")
   vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(key, true, false, true), "t", true)
@@ -600,9 +657,10 @@ local nvim_opt_edit = function(selected, opts, scope)
     if not updated or updated == old then return end
 
     if info.type == "number" then
-      updated = tonumber(updated)
+      nvim_set_option(option, tonumber(updated), info)
+    else
+      nvim_set_option(option, updated, info)
     end
-    nvim_set_option(option, updated, info)
   end
 
   local parts = vim.split(selected[1], opts.separator)
@@ -630,11 +688,19 @@ M.nvim_opt_edit_global = function(selected, opts)
   return nvim_opt_edit(selected, opts, "global")
 end
 
-M.spell_apply = function(selected)
+M.spell_apply = function(selected, opts)
   if not selected[1] then return false end
   local word = selected[1]
-  vim.cmd("normal! ciw" .. word)
-  vim.cmd("stopinsert")
+  vim.cmd("normal! \"_ciw" .. word)
+  if opts.__CTX.mode == "i" then
+    vim.api.nvim_feedkeys("a", "n", true)
+  end
+end
+
+M.spell_suggest = function(selected, opts)
+  if not selected[1] then return false end
+  M.file_edit(selected, opts)
+  FzfLua.spell_suggest({ no_resume = true })
 end
 
 M.set_filetype = function(selected)
@@ -663,16 +729,21 @@ local function helptags(s, opts)
 end
 
 M.help = function(selected, opts)
+  if #selected == 0 then return end
   vim.cmd("help " .. helptags(selected, opts)[1])
 end
 
 M.help_vert = function(selected, opts)
+  if #selected == 0 then return end
   vim.cmd("vert help " .. helptags(selected, opts)[1])
 end
 
 M.help_tab = function(selected, opts)
+  if #selected == 0 then return end
   -- vim.cmd("tab help " .. helptags(selected, opts)[1])
-  vim.cmd("tabnew | setlocal bufhidden=wipe | help " .. helptags(selected, opts)[1] .. " | only")
+  utils.with({ go = { splitkeep = "cursor" } }, function()
+    vim.cmd("tabnew | setlocal bufhidden=wipe | help " .. helptags(selected, opts)[1] .. " | only")
+  end)
 end
 
 local function mantags(s)
@@ -680,16 +751,20 @@ local function mantags(s)
 end
 
 M.man = function(selected)
+  if #selected == 0 then return end
   vim.cmd("Man " .. mantags(selected)[1])
 end
 
 M.man_vert = function(selected)
+  if #selected == 0 then return end
   vim.cmd("vert Man " .. mantags(selected)[1])
 end
 
 M.man_tab = function(selected)
-  -- vim.cmd("tab Man " .. mantags(selected)[1])
-  vim.cmd("tabnew | setlocal bufhidden=wipe | Man " .. mantags(selected)[1] .. " | only")
+  if #selected == 0 then return end
+  utils.with({ go = { splitkeep = "cursor" } }, function()
+    vim.cmd("tabnew | setlocal bufhidden=wipe | Man " .. mantags(selected)[1] .. " | only")
+  end)
 end
 
 M.git_switch = function(selected, opts)
@@ -714,7 +789,7 @@ M.git_switch = function(selected, opts)
   table.insert(cmd, branch)
   local output, rc = utils.io_systemlist(cmd)
   if rc ~= 0 then
-    utils.err(unpack(output))
+    utils.error(unpack(output))
   else
     utils.info(unpack(output))
     vim.cmd("checktime")
@@ -734,27 +809,28 @@ M.git_branch_add = function(selected, opts)
     table.insert(cmd_add_branch, branch)
     local output, rc = utils.io_systemlist(cmd_add_branch)
     if rc ~= 0 then
-      utils.err(unpack(output))
+      utils.error(unpack(output))
     else
-      utils.info(string.format("Created branch '%s'.", branch))
+      utils.info("Created branch '%s'.", branch)
     end
   end
 end
 
 M.git_branch_del = function(selected, opts)
+  if #selected == 0 then return end
   local cmd_del_branch = path.git_cwd(opts.cmd_del, opts)
   local cmd_cur_branch = path.git_cwd({ "git", "rev-parse", "--abbrev-ref", "HEAD" }, opts)
   local branch = selected[1]:match("[^%s%*]+")
   local cur_branch = utils.io_systemlist(cmd_cur_branch)[1]
   if branch == cur_branch then
-    utils.warn(string.format("Cannot delete active branch '%s'", branch))
+    utils.warn("Cannot delete active branch '%s'", branch)
     return
   end
   if vim.fn.confirm("Delete branch " .. branch .. "?", "&Yes\n&No") == 1 then
     table.insert(cmd_del_branch, branch)
     local output, rc = utils.io_systemlist(cmd_del_branch)
     if rc ~= 0 then
-      utils.err(unpack(output))
+      utils.error(unpack(output))
     else
       utils.info(unpack(output))
     end
@@ -772,19 +848,24 @@ end
 M.git_yank_commit = function(selected, opts)
   if not selected[1] then return end
   local commit_hash = match_commit_hash(selected[1], opts)
-  local reg
-  if vim.o.clipboard == "unnamed" then
-    reg = [[*]]
-  elseif vim.o.clipboard == "unnamedplus" then
-    reg = [[+]]
-  else
-    reg = [["]]
-  end
+  local regs, cb = {}, vim.o.clipboard
+  if cb:match("unnamed") then regs[#regs + 1] = [[*]] end
+  if cb:match("unnamedplus") then regs[#regs + 1] = [[+]] end
+  if #regs == 0 then regs[#regs + 1] = [["]] end
   -- copy to the yank register regardless
-  vim.fn.setreg(reg, commit_hash)
+  for _, reg in ipairs(regs) do
+    vim.fn.setreg(reg, commit_hash)
+  end
   vim.fn.setreg([[0]], commit_hash)
-  utils.info(string.format("commit hash %s copied to register %s, use 'p' to paste.",
-    commit_hash, reg))
+  utils.info({
+    "commit hash ",
+    { commit_hash, "DiagnosticVirtualLinesWarn" },
+    " copied to register ",
+    { regs[1],     "DiagnosticVirtualLinesHint" },
+    ", use '",
+    { "p", "DiagnosticVirtualLinesHint" },
+    "' to paste.",
+  })
 end
 
 M.git_checkout = function(selected, opts)
@@ -797,7 +878,7 @@ M.git_checkout = function(selected, opts)
     table.insert(cmd_checkout, commit_hash)
     local output, rc = utils.io_systemlist(cmd_checkout)
     if rc ~= 0 then
-      utils.err(unpack(output))
+      utils.error(unpack(output))
     else
       utils.info(unpack(output))
       vim.cmd("checktime")
@@ -813,7 +894,7 @@ local git_exec = function(selected, opts, cmd, silent)
     table.insert(_cmd, file)
     local output, rc = utils.io_systemlist(_cmd)
     if rc ~= 0 and not silent then
-      utils.err(unpack(output) or string.format("exit code %d", rc))
+      utils.error(unpack(output) or string.format("exit code %d", rc))
     end
     success = rc == 0
   end
@@ -890,6 +971,7 @@ M.git_stash_apply = function(selected, opts)
 end
 
 M.git_buf_edit = function(selected, opts)
+  if #selected == 0 then return end
   local cmd = path.git_cwd({ "git", "show" }, opts)
   local git_root = path.git_root(opts, true)
   local win = vim.api.nvim_get_current_win()
@@ -925,6 +1007,7 @@ M.git_buf_vsplit = function(selected, opts)
 end
 
 M.git_goto_line = function(selected, _)
+  if #selected == 0 then return end
   local line = selected[1] and selected[1]:match("^.-(%d+)%)")
   if tonumber(line) then
     vim.api.nvim_win_set_cursor(0, { tonumber(line), 0 })
@@ -938,7 +1021,7 @@ M.grep_lgrep = function(_, opts)
     __resume_key = opts.__resume_key,
     rg_glob = opts.rg_glob or opts.__call_opts.rg_glob,
     -- globs always require command processing with 'multiprocess'
-    requires_processing = opts.rg_glob or opts.__call_opts.rg_glob,
+    multiprocess = opts.multiprcess and (opts.rg_glob or opts.__call_opts.rg_glob) and 1,
     -- when used with tags pass the resolved ctags_file from tags-option as
     -- `tagfiles()` might not return the correct file called from the float (#700)
     ctags_file = opts.ctags_file,
@@ -955,7 +1038,7 @@ M.toggle_flag = function(_, opts)
   local o = vim.tbl_deep_extend("keep", {
     -- grep|live_grep sets `opts._cmd` to the original
     -- command without the search argument
-    cmd = utils.toggle_cmd_flag(opts._cmd or opts.cmd, opts.toggle_flag),
+    cmd = utils.toggle_cmd_flag(assert(opts._cmd or opts.cmd), assert(opts.toggle_flag)),
     resume = true
   }, opts.__call_opts)
   opts.__call_fn(o)
@@ -981,21 +1064,22 @@ M.toggle_follow = function(_, opts)
 end
 
 M.tmux_buf_set_reg = function(selected, opts)
+  if #selected == 0 then return end
   local buf = selected[1]:match("^%[(.-)%]")
   local data, rc = utils.io_system({ "tmux", "show-buffer", "-b", buf })
   if rc == 0 and data and #data > 0 then
     opts.register = opts.register or [["]]
     local ok, err = pcall(vim.fn.setreg, opts.register, data)
     if ok then
-      utils.info(string.format("%d characters copied into register %s",
-        #data, opts.register))
+      utils.info("%d characters copied into register %s", #data, opts.register)
     else
-      utils.err(string.format("setreg(%s) failed: %s", opts.register, err))
+      utils.error("setreg(%s) failed: %s", opts.register, err)
     end
   end
 end
 
 M.paste_register = function(selected)
+  if #selected == 0 then return end
   local reg = selected[1]:match("%[(.-)%]")
   local ok, data = pcall(vim.fn.getreg, reg)
   if ok and #data > 0 then
@@ -1004,6 +1088,7 @@ M.paste_register = function(selected)
 end
 
 M.set_qflist = function(selected, opts)
+  if #selected == 0 then return end
   local nr = selected[1]:match("[(%d+)]")
   vim.cmd(string.format("%d%s", tonumber(nr),
     opts._is_loclist and "lhistory" or "chistory"))
@@ -1013,16 +1098,23 @@ end
 ---@param selected string[]
 ---@param opts table
 M.apply_profile = function(selected, opts)
+  if #selected == 0 then return end
   local entry = path.entry_to_file(selected[1])
   local fname = entry.path
   local profile = entry.stripped:sub(#fname + 2):match("[^%s]+")
   local ok = utils.load_profile_fname(fname, profile, opts.silent)
   if ok then
-    loadstring(string.format([[require("fzf-lua").setup({"%s"})]], profile))()
+    require("fzf-lua").setup({ profile })
   end
 end
 
 M.complete = function(selected, opts)
+  if #selected == 0 then
+    if opts.__CTX.mode == "i" then
+      vim.cmd [[noautocmd lua vim.api.nvim_feedkeys('i', 'n', true)]]
+    end
+    return
+  end
   -- cusror col is 0-based
   local col = opts.__CTX.cursor[2] + 1
   local newline, newcol
@@ -1066,6 +1158,7 @@ M.dap_bp_del = function(selected, opts)
 end
 
 M.cd = function(selected, opts)
+  if #selected == 0 then return end
   local cwd = selected[1]:match("[^\t]+$") or selected[1]
   if opts.cwd then
     cwd = path.join({ opts.cwd, cwd })
@@ -1074,6 +1167,7 @@ M.cd = function(selected, opts)
   cwd = git_root or cwd
   if uv.fs_stat(cwd) then
     vim.cmd("cd " .. cwd)
+    utils.io_system({ "zoxide", "add", "--", cwd })
     utils.info(("cwd set to %s'%s'"):format(git_root and "git root " or "", cwd))
   else
     utils.warn(("Unable to set cwd to '%s', directory is not accessible"):format(cwd))

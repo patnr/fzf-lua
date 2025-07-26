@@ -45,8 +45,6 @@ function NvimWebDevicons:new()
 end
 
 function NvimWebDevicons:load(do_not_lazy_load)
-  -- limit devicons support to nvim >=0.8, although official support is >=0.7
-  -- running setup on 0.7 errs with "W18: Invalid character in group name"
   if not self._package_loaded
       -- do not trigger lazy loading
       and (not do_not_lazy_load or package.loaded[self._package_name])
@@ -65,6 +63,7 @@ function NvimWebDevicons:is_mock()
       and self._package_path:match("mini") ~= nil
 end
 
+---@param opts table
 ---@return boolean|nil success
 function NvimWebDevicons:load_icons(opts)
   if not self:loaded() then return end
@@ -106,7 +105,7 @@ function NvimWebDevicons:load_icons(opts)
   end)
   if not ok or not all_devicons or utils.tbl_isempty(all_devicons) then
     -- something is wrong with devicons
-    utils.err("devicons.get_icons() is nil or empty!")
+    utils.error("devicons.get_icons() is nil or empty!")
     return
   end
   local icons = {
@@ -180,7 +179,7 @@ function MiniIcons:new()
 end
 
 function MiniIcons:load(do_not_lazy_load)
-  if not self._package_loaded and utils.__HAS_NVIM_08
+  if not self._package_loaded
       -- do not trigger lazy loading
       and (not do_not_lazy_load or package.loaded[self._package_name])
   then
@@ -349,6 +348,7 @@ M.__DEVICONS = NvimWebDevicons:new()
 -- Load an icons provider and sets the module local var `M.PLUGIN`
 -- "auto" prefers nvim-web-devicons, "srv" RPC-queries main instance
 ---@param provider nil|boolean|string|"auto"|"devicons"|"mini"|"srv"
+---@param do_not_lazy_load boolean?
 ---@return boolean success
 M.plugin_load = function(provider, do_not_lazy_load)
   -- Called from "make_entry.lua" without params (already loaded)
@@ -426,7 +426,7 @@ end
 -- NOTE: plugin_name is only sent when called from `FzfLuaServer:load_icons`
 -- it is used when testing from "devicons_spec.lua" as calling `M.load()`
 -- changes the ref in `M.PLUGIN` and will then return a nil `:state()`
----@param plugin_name string
+---@param plugin_name string?
 ---@return table STATE
 M.state = function(plugin_name)
   if plugin_name == "mini" then
@@ -461,7 +461,7 @@ end
 M.get_devicon = function(filepath, extensionOverride)
   local STATE = M.state()
   if not STATE or not STATE.icons then
-    return unpack({ "", nil })
+    return "", nil
   end
 
   local function validate_hl(col)
@@ -518,6 +518,8 @@ M.get_devicon = function(filepath, extensionOverride)
     -- main thread but not on headless as it will fail due to uv callbacks (#1831/#1841)
     local ft_match = _G._fzf_lua_is_headless and path.ft_match or path.ft_match_fast_event
     local ft = ft_match({ filename = filename })
+
+    ---@type  { icon: string?, color: string? }?
     local by_ft = ft and #ft > 0 and STATE.icons.by_filetype[ft]
 
     if not by_ft then
@@ -549,6 +551,7 @@ M.get_devicon = function(filepath, extensionOverride)
   return icon, validate_hl(color)
 end
 
+---@param opts table?
 ---@return boolean|nil success
 M.load = function(opts)
   opts = opts or {}
