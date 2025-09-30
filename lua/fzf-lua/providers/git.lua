@@ -27,7 +27,6 @@ M.files = function(opts)
   if not opts then return end
   opts = set_git_cwd_args(opts)
   if not opts.cwd then return end
-  opts = core.set_header(opts, opts.headers or { "cwd" })
   return core.fzf_exec(opts.cmd, opts)
 end
 
@@ -52,7 +51,6 @@ M.status = function(opts)
 
   opts.header_prefix = opts.header_prefix or "+ -  "
   opts.header_separator = opts.header_separator or "|"
-  opts = core.set_header(opts, opts.headers or { "actions", "cwd" })
 
   return core.fzf_exec(opts.cmd, opts)
 end
@@ -60,12 +58,11 @@ end
 local function git_cmd(opts)
   opts = set_git_cwd_args(opts)
   if not opts.cwd then return end
-  opts = core.set_header(opts, opts.headers or { "cwd" })
   return core.fzf_exec(opts.cmd, opts)
 end
 
 local function git_preview(opts, file)
-  if not type(opts.preview) == "string" then return end
+  if type(opts.preview) ~= "string" then return end
   if file then
     opts.preview = opts.preview:gsub("[<{]file[}>]", file)
   end
@@ -101,7 +98,6 @@ M.diff = function(opts)
   opts = set_git_cwd_args(opts)
   if not opts.cwd then return end
   opts.preview = git_preview(opts, "{-1}")
-  opts = core.set_header(opts, opts.headers or { "cwd" })
   return core.fzf_exec(opts.cmd, opts)
 end
 
@@ -110,7 +106,6 @@ M.commits = function(opts)
   opts = config.normalize_opts(opts, "git.commits")
   if not opts then return end
   opts.preview = git_preview(opts)
-  opts = core.set_header(opts, opts.headers or { "actions", "cwd" })
   return git_cmd(opts)
 end
 
@@ -146,7 +141,6 @@ M.bcommits = function(opts)
     opts.cmd = opts.cmd .. " " .. (range or file)
   end
   opts.preview = git_preview(opts, file)
-  opts = core.set_header(opts, opts.headers or { "actions", "cwd" })
   return git_cmd(opts)
 end
 
@@ -178,7 +172,6 @@ M.blame = function(opts)
     opts.cmd = opts.cmd .. " " .. (range or file)
   end
   opts.preview = git_preview(opts, file)
-  opts = core.set_header(opts, opts.headers or { "actions", "cwd" })
   return git_cmd(opts)
 end
 
@@ -198,7 +191,21 @@ M.branches = function(opts)
       return (preview:gsub("{.*}", branch))
     end, opts, "{}")
   end
-  opts.headers = opts.headers or { "cwd", "actions" }
+  return git_cmd(opts)
+end
+
+M.worktrees = function(opts)
+  ---@type fzf-lua.config.GitWorktrees
+  opts = config.normalize_opts(opts, "git.worktrees")
+  if not opts then return end
+  if opts.preview then
+    local preview_cmd = opts.preview
+    opts.preview = shell.stringify_cmd(function(items)
+      local cwd = items[1]:match("^[^%s]+")
+      local cmd = path.git_cwd(preview_cmd, { cwd = cwd })
+      return cmd
+    end, opts, "{}")
+  end
   return git_cmd(opts)
 end
 
@@ -227,15 +234,14 @@ M.stash = function(opts)
   opts.fn_transform = function(x)
     local stash, rest = x:match("([^:]+)(.*)")
     if stash then
-      stash = utils.ansi_codes.yellow(stash)
+      stash = FzfLua.utils.ansi_codes.yellow(stash)
       stash = stash:gsub("{%d+}", function(s)
-        return ("%s"):format(utils.ansi_codes.green(tostring(s)))
+        return ("%s"):format(FzfLua.utils.ansi_codes.green(tostring(s)))
       end)
     end
     return (not stash or not rest) and x or stash .. rest
   end
 
-  opts = core.set_header(opts, opts.headers or { "actions", "cwd", "search" })
   return core.fzf_exec(opts.cmd, opts)
 end
 
@@ -259,7 +265,6 @@ M.hunks = function(opts)
 
   opts.header_prefix = opts.header_prefix or "+ -  "
   opts.header_separator = opts.header_separator or "|"
-  opts = core.set_header(opts, opts.headers or { "actions", "cwd" })
 
   return core.fzf_exec(opts.cmd, opts)
 end

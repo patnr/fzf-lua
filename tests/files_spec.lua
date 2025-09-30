@@ -82,12 +82,12 @@ T["files"]["previewer"]["builtin"] = new_set({ parametrize = { { "ci" }, { "buil
       winopts = { preview = { scrollbar = false } },
       previewer = previewer == "builtin"
           and "builtin"
-          or [[require('fzf-lua.test.previewer')]],
+          or function() return require("fzf-lua.test.previewer").builtin end,
       __after_open = function()
         -- Verify previewer "last_entry" was set
         child.type_keys("<c-j>")
         child.wait_until(function()
-          return child.lua_get([[FzfLua.utils.fzf_winobj()._previewer.last_entry]]) ==
+          return exec_lua([[return FzfLua.utils.fzf_winobj()._previewer.last_entry]]) ==
               (icons and " LICENSE" or "LICENSE")
         end)
       end,
@@ -109,7 +109,7 @@ T["files"]["icons"]["defaults"] = new_set({ parametrize = { { "+attrs" }, { "-at
     exec_lua("vim.opt.runtimepath:append(...)", { path })
     exec_lua(([[require("%s").setup({})]]):format(icons == "mini" and "mini.icons" or plugin))
     helpers.FzfLua.files(child, {
-      __expect_lines = not attrs,
+      __expect_lines = not attrs or nil,
       hidden = false,
       previewer = false,
       cwd_prompt = false,
@@ -157,7 +157,7 @@ T["files"]["executable"] = new_set({ parametrize = { { "fd" }, { "rg" }, { "find
         return _G._exec(x)
       end
     ]]):format(exclude))
-    helpers.FzfLua.files(child, vim.tbl_extend("keep", opts, {
+    helpers.FzfLua.files(child, vim.tbl_deep_extend("keep", opts, {
       __expect_lines = true,
       __screen_opts = screen_opts,
       debug = 1,
@@ -185,6 +185,34 @@ T["files"]["preview should work after chdir #1864"] = function()
       sleep(100)
     end
   })
+end
+
+T["files"]["nop on nothing match"] = function()
+  reload({ "hide" })
+  local ctx = exec_lua([[return FzfLua.utils.CTX()]])
+  for _, key in ipairs({ "<cr>", "<c-t>" }) do
+    exec_lua([[FzfLua.files { query = ("%s is nop on nothing match"):format(...) }]], { key })
+    child.wait_until(function() return exec_lua([[return _G._fzf_load_called]]) == true end)
+    child.type_keys(key)
+    child.wait_until(function() return exec_lua([[return _G._fzf_lua_on_create]]) == vim.NIL end)
+    eq(ctx, exec_lua([[return FzfLua.utils.CTX()]]))
+  end
+end
+
+T["files"]["line_query"] = function()
+  helpers.FzfLua.files(child, {
+    __expect_lines = true,
+    __abort_key = "<c-t>",
+    cmd = "rg --files LICENSE",
+    hidden = false,
+    cwd_prompt = false,
+    previewer = "builtin",
+    line_query = true,
+    query = "lic es :21",
+    __after_open = function() if helpers.IS_WIN() then sleep(250) end end
+  })
+  -- child.wait_until(function() return exec_lua([[return _G._fzf_lua_on_create]]) == vim.NIL end)
+  eq({ "LICENSE", 21 }, { vim.fs.basename(child.fn.bufname()), child.fn.line(".") })
 end
 
 return T

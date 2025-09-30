@@ -9,50 +9,49 @@ local T = helpers.new_set_with_child(child)
 
 T["api"] = new_set({ n_retry = not helpers.IS_LINUX() and 5 or nil })
 
-T["api"]["fzf_exec"] = new_set()
+T["api"]["fzf_exec"] = new_set({ parametrize = { { true }, { false }, { 1 } } })
 
-T["api"]["fzf_exec"]["table"] = function()
-  helpers.FzfLua.fzf_exec(child, [==[(function()
-      local contents = {}
-      for i = 1, 100 do
-        for j, s in ipairs({ "foo", "bar", "baz" }) do
-          table.insert(contents, tostring((i - 1) * 3 + j) .. ": " .. s)
-        end
-      end
-      return contents
-    end)()]==],
-    { __expect_lines = true, __postprocess_wait = true })
+T["api"]["fzf_exec"]["table"] = function(multiprocess)
+  local contents = {}
+  for i = 1, 100 do
+    for j, s in ipairs({ "foo", "bar", "baz" }) do
+      table.insert(contents, tostring((i - 1) * 3 + j) .. ": " .. s)
+    end
+  end
+  helpers.FzfLua.fzf_exec(child, contents,
+    { __expect_lines = true, __postprocess_wait = true, multiprocess = multiprocess == true })
 end
 
 T["api"]["fzf_exec"]["function"] = new_set({ parametrize = { { "sync" }, { "async" } } }, {
-  function(type)
+  function(multiprocess, type)
     if type == "sync" then
-      helpers.FzfLua.fzf_exec(child, [==[(function(fzf_cb)
-          for i=1, 1000 do
+      helpers.FzfLua.fzf_exec(child, function(fzf_cb)
+          for i = 1, 1000 do
             fzf_cb(tostring(i))
           end
           fzf_cb(nil)
-        end)
-        ]==],
+        end,
         { __expect_lines = true, __postprocess_wait = true })
     else
-      helpers.FzfLua.fzf_exec(child, [==[(coroutine.wrap(function(fzf_cb)
-          local co = coroutine.running()
-          for i=1, 1000 do
-            fzf_cb(tostring(i), function() coroutine.resume(co) end)
-            coroutine.yield()
-          end
-          fzf_cb(nil)
-        end))]==],
+      helpers.FzfLua.fzf_exec(child, function(fzf_cb)
+          coroutine.wrap(function()
+            local co = coroutine.running()
+            for i = 1, 1000 do
+              fzf_cb(tostring(i), function() coroutine.resume(co) end)
+              coroutine.yield()
+            end
+            fzf_cb(nil)
+          end)()
+        end,
         { __expect_lines = true, __postprocess_wait = true })
     end
   end,
 })
 
-T["api"]["fzf_exec"]["rg"] = new_set({ parametrize = { { true }, { false }, { 1 } } }, {
+T["api"]["fzf_exec"]["rg"] = new_set({}, {
   function(multiprocess)
     helpers.FzfLua.fzf_exec(child,
-      [['rg --files -g !.git -g !tests/** --sort=path']],
+      "rg --files -g !.git -g !tests/** --sort=path",
       {
         __expect_lines = true,
         -- __postprocess_wait = multiprocess ~= 1,
@@ -62,14 +61,14 @@ T["api"]["fzf_exec"]["rg"] = new_set({ parametrize = { { true }, { false }, { 1 
   end
 })
 
-T["api"]["fzf_exec"]["fn_transform"] = new_set({ parametrize = { { true }, { false } } })
+T["api"]["fzf_exec"]["fn_transform"] = new_set()
 
 T["api"]["fzf_exec"]["fn_transform"]["filter"] = new_set(
   { parametrize = { { 0 }, { 13 }, { 24 } } }, {
     function(multiprocess, filter)
       local AND = helpers.IS_WIN() and "&" or "&&"
       helpers.FzfLua.fzf_exec(child,
-        string.format([["echo one%secho two%secho three%secho four"]], AND, AND, AND),
+        string.format("echo one%secho two%secho three%secho four", AND, AND, AND),
         {
           -- __postprocess_wait = multiprocess ~= 1,
           __expect_lines = true,
@@ -90,10 +89,10 @@ T["api"]["fzf_exec"]["fn_transform"]["filter"] = new_set(
   })
 
 
-T["api"]["fzf_live"] = new_set()
+T["api"]["fzf_live"] = new_set({ parametrize = { { true }, { false }, { 1 } } })
 
-T["api"]["fzf_live"]["table"] = function()
-  helpers.FzfLua.fzf_live(child, [==[function(args)
+T["api"]["fzf_live"]["table"] = function(multiprocess)
+  helpers.FzfLua.fzf_live(child, function(args)
       local q = args[1]
       if not tonumber(q) then
         return { "Invalid number: " .. tostring(q) }
@@ -105,18 +104,19 @@ T["api"]["fzf_live"]["table"] = function()
         end
       end
       return lines
-    end]==],
+    end,
     {
       __expect_lines = true,
       __postprocess_wait = true,
       query = 100,
+      multiprocess = multiprocess == true,
     })
 end
 
 T["api"]["fzf_live"]["function"] = new_set({ parametrize = { { "sync" }, { "async" } } }, {
-  function(type)
+  function(multiprocess, type)
     if type == "sync" then
-      helpers.FzfLua.fzf_live(child, [==[function(args)
+      helpers.FzfLua.fzf_live(child, function(args)
           local q = args[1]
           return function(fzf_cb)
             if not tonumber(q) then
@@ -130,14 +130,19 @@ T["api"]["fzf_live"]["function"] = new_set({ parametrize = { { "sync" }, { "asyn
             end
             fzf_cb(nil)
           end
-        end]==],
+        end,
         {
           __expect_lines = true,
           __postprocess_wait = true,
+          __after_open = function()
+            child.wait_until(function() return child.lua_get([[_G._fzf_load_called]]) == true end)
+          end,
           query = 100,
+          keymap = { fzf = { load = "pos(-1)" } },
+          multiprocess = multiprocess == true,
         })
     else
-      helpers.FzfLua.fzf_live(child, [==[function(args)
+      helpers.FzfLua.fzf_live(child, function(args)
           local q = args[1]
           return coroutine.wrap(function(fzf_cb)
             local co = coroutine.running()
@@ -154,11 +159,15 @@ T["api"]["fzf_live"]["function"] = new_set({ parametrize = { { "sync" }, { "asyn
             end
             fzf_cb(nil)
           end)
-        end]==],
+        end,
         {
           __expect_lines = true,
           __postprocess_wait = true,
+          __after_open = function()
+            child.wait_until(function() return child.lua_get([[_G._fzf_load_called]]) == true end)
+          end,
           query = 100,
+          keymap = { fzf = { load = "pos(-1)" } },
         })
     end
   end,
@@ -166,9 +175,9 @@ T["api"]["fzf_live"]["function"] = new_set({ parametrize = { { "sync" }, { "asyn
 
 T["api"]["fzf_live"]["rg"] = new_set()
 
-T["api"]["fzf_live"]["rg"]["error"] = new_set({ parametrize = { { true }, { false }, { 1 } } }, {
+T["api"]["fzf_live"]["rg"]["error"] = new_set({}, {
   function(multiprocess)
-    helpers.FzfLua.fzf_live(child, [["rg --column --line-number --smart-case"]], {
+    helpers.FzfLua.fzf_live(child, "rg --column --line-number --smart-case", {
       __expect_lines = true,
       -- multiprocess==1 should fallback to native (no [DEBUG] line)
       -- as no fn_transform or fn_preprocess are present
@@ -183,25 +192,30 @@ T["api"]["fzf_live"]["rg"]["error"] = new_set({ parametrize = { { true }, { fals
 T["api"]["fzf_live"]["rg"]["no error"] = new_set(
   { parametrize = { { "[" }, { [[table of cont]] } } },
   {
-    function(query)
+    function(multiprocess, query)
       helpers.FzfLua.fzf_live(child,
         string.format(
-          [["rg --column --line-number --smart-case --sort=path -g !tests/ -- <query> 2> %s"]],
+          "rg --column --line-number --smart-case --sort=path -g !tests/ -- <query> 2> %s",
           helpers.IS_WIN() and "nul" or "/dev/null"
         ),
         {
           __expect_lines = true,
-          multiprocess = false,
+          multiprocess = multiprocess,
           debug = 1,
           query = query,
-          -- Windows fails due to the spaced query term with the native
-          -- exec_empty_query shell condition, disable empty query to
-          -- remove the empty query condition from the shell command
-          exec_empty_query = true,
         })
     end
   }
 )
+
+T["api"]["fzf_live"]["exec_empty_query"] = function(multiprocess, query)
+  helpers.FzfLua.fzf_live(child, "echo <query>", {
+    __expect_lines = true,
+    multiprocess = multiprocess,
+    debug = 1,
+    query = query,
+  })
+end
 
 T["api"]["events"] = new_set(
   { parametrize = { { "fzf_exec" }, { "fzf_live" } } },
@@ -210,8 +224,8 @@ T["api"]["events"] = new_set(
       local prompt = "EventsPrompt>"
       helpers.FzfLua[api](child,
         api == "fzf_exec"
-        and [[(function() return { "foo", "bar", "baz" } end)()]]
-        or [[function() return { "foo", "bar", "baz" } end ]],
+        and (function() return { "foo", "bar", "baz" } end)()
+        or function() return { "foo", "bar", "baz" } end,
         {
           __expect_lines = true,
           prompt = prompt,

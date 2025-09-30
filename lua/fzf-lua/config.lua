@@ -63,7 +63,9 @@ M.setup_opts = {}
 M.globals = setmetatable({}, {
   __index = function(_, index)
     local function setup_opts()
-      return M._profile_opts or M.setup_opts
+      return M._profile_opts
+          and vim.tbl_deep_extend("keep", {}, M._profile_opts, M.setup_opts)
+          or M.setup_opts
     end
     local function setup_defaults()
       return M._profile_opts and (M._profile_opts.defaults or {}) or M.setup_opts.defaults or {}
@@ -142,21 +144,39 @@ local eval = function(v, ...)
   return v
 end
 
+
+---expand opts that were specified with a dot
+---@param opts table
+local normalize_tbl = function(opts)
+  -- convert keys only after full iteration or we will
+  -- miss keys due to messing with map ordering
+  local to_convert = {}
+  for k, _ in pairs(opts) do
+    if k:match("%.") then
+      table.insert(to_convert, k)
+    end
+  end
+  for _, k in ipairs(to_convert) do
+    utils.map_set(opts, k, opts[k])
+    opts[k] = nil
+  end
+end
+
 ---@param opts fzf-lua.config.Base|{}|fun():table?
 ---@param globals string|table?
 ---@param __resume_key string?
 ---@return fzf-lua.Config?
 function M.normalize_opts(opts, globals, __resume_key)
-  if not opts then opts = {} end
-
   -- opts can also be a function that returns an opts table
-  if type(opts) == "function" then
-    opts = opts() or {}
-  end
+  ---@type fzf-lua.config.Base|{}
+  opts = eval(opts) or {}
 
   if opts._normalized then
     return opts
   end
+
+  -- e.g. `:FzfLua files winopts.border=single`
+  normalize_tbl(opts)
 
   local profile = opts.profile or (function()
     if type(globals) == "string" then
@@ -167,23 +187,6 @@ function M.normalize_opts(opts, globals, __resume_key)
   if type(profile) == "table" or type(profile) == "string" then
     -- TODO: we should probably cache the profiles
     M._profile_opts = utils.load_profiles(profile, 1)
-  end
-
-  -- expand opts that were specified with a dot
-  -- e.g. `:FzfLua files winopts.border=single`
-  do
-    -- convert keys only after full iteration or we will
-    -- miss keys due to messing with map ordering
-    local to_convert = {}
-    for k, _ in pairs(opts) do
-      if k:match("%.") then
-        table.insert(to_convert, k)
-      end
-    end
-    for _, k in ipairs(to_convert) do
-      utils.map_set(opts, k, opts[k])
-      opts[k] = nil
-    end
   end
 
   -- save the user's original call params separately
@@ -207,7 +210,7 @@ function M.normalize_opts(opts, globals, __resume_key)
     -- merge with setup options "defaults" table
     globals = vim.tbl_deep_extend("keep", globals, M.setup_opts.defaults or {})
   end
-  ---@cast globals table
+  ---@cast globals fzf-lua.config.Base
 
   -- merge current opts with revious __call_opts on resume
   if opts.resume then
@@ -279,11 +282,8 @@ function M.normalize_opts(opts, globals, __resume_key)
     end
   end
 
-  -- Merge values from globals
-  for _, k in ipairs({
-    "winopts", "keymap", "fzf_opts", "fzf_colors", "fzf_tmux_opts", "hls"
-  }) do
-    local setup_val = M.globals[k]
+  local extend_opts = function(m, k)
+    local setup_val = m[k]
     if type(setup_val) == "function" then
       setup_val = setup_val(opts)
       if type(setup_val) == "table" then
@@ -309,6 +309,14 @@ function M.normalize_opts(opts, globals, __resume_key)
           opts[k], type(setup_val) == "table" and setup_val or {})
       end
     end
+  end
+
+  -- Merge values from globals
+  for _, k in ipairs({
+    "winopts", "keymap", "fzf_opts", "fzf_colors", "fzf_tmux_opts", "hls"
+  }) do
+    extend_opts(globals, k)
+    extend_opts(M.globals, k)
   end
 
   -- backward compat: no-value flags should be set to `true`, in the past these
@@ -341,7 +349,7 @@ function M.normalize_opts(opts, globals, __resume_key)
   -- for these as they only work for maps, ie. '{ key = value }'
   for _, k in ipairs({ "file_ignore_patterns" }) do
     for _, m in ipairs({ globals, M.globals }) do
-      if m[k] then
+      if m[k] and opts[k] ~= false then
         for _, item in ipairs(m[k]) do
           if not opts[k] then opts[k] = {} end
           table.insert(opts[k], item)
@@ -494,7 +502,7 @@ function M.normalize_opts(opts, globals, __resume_key)
   end
 
   -- Exclude file icons from the fuzzy matching (#1080)
-  if opts.file_icons
+  if (opts.file_icons or opts.git_icons)
       and opts._fzf_nth_devicons
       and not opts.fzf_opts["--delimiter"]
       -- Can't work due to : delimiter (#2112)
@@ -658,7 +666,7 @@ function M.normalize_opts(opts, globals, __resume_key)
         opts.fzf_bin = fzf_plug
       end
     end
-    if not executable(opts.fzf_bin, utils.err,
+    if not executable(opts.fzf_bin, utils.error,
           "aborting. Please make sure 'fzf' is in installed.") then
       return nil
     end
@@ -934,13 +942,18 @@ function M.normalize_opts(opts, globals, __resume_key)
   if opts.line_query and not utils.has(opts, "fzf", { 0, 59 }) then
     utils.warn("'line_query' requires fzf >= 0.59, ignoring.")
   elseif opts.line_query then
+    opts.line_query = type(opts.line_query) == "function"
+        and opts.line_query or function(q)
+          if not q then return end
+          local lnum = q:match(":(%d+)$")
+          local new_q, subs = q:gsub(":%d*$", "")
+          return lnum, (subs > 0 and new_q or nil)
+        end
     utils.map_set(opts, "winopts.preview.winopts.cursorline", true)
-    table.insert(opts._fzf_cli_args, "--bind=" .. libuv.shellescape("change:+transform:"
+    table.insert(opts._fzf_cli_args, "--bind=" .. libuv.shellescape("start,change:+transform:"
       .. FzfLua.shell.stringify_data(function(q, _, _)
-        local lnum = q[1]:match(":(%d+)$")
-        local new_q, subs = q[1]:gsub(":%d*$", "")
-        -- No subs made, no ":" at end of string, do nothing
-        if subs == 0 then return end
+        local lnum, new_q = opts.line_query(q[1])
+        if not new_q then return end
         local trans = string.format("search(%s)", new_q)
         local win = FzfLua.win.__SELF()
         -- Do we need to change the offset in native fzf previewer (e.g. bat)?
@@ -1024,8 +1037,11 @@ M._action_to_helpstr = {
   [actions.exec_menu]            = "exec-menu",
   [actions.search]               = "edit-search",
   [actions.search_cr]            = "exec-search",
-  [actions.goto_mark]            = "goto-mark",
   [actions.goto_jump]            = "goto-jump",
+  [actions.goto_mark]            = "goto-mark",
+  [actions.goto_mark_split]      = "goto-mark-split",
+  [actions.goto_mark_vsplit]     = "goto-mark-vsplit",
+  [actions.goto_mark_tabedit]    = "goto-mark-tabedit",
   [actions.keymap_apply]         = "keymap-apply",
   [actions.keymap_edit]          = "keymap-edit",
   [actions.keymap_split]         = "keymap-split",
@@ -1046,6 +1062,7 @@ M._action_to_helpstr = {
   [actions.git_branch_add]       = "git-branch-add",
   [actions.git_branch_del]       = "git-branch-del",
   [actions.git_switch]           = "git-switch",
+  [actions.git_worktree_cd]      = "change-directory",
   [actions.git_checkout]         = "git-checkout",
   [actions.git_reset]            = "git-reset",
   [actions.git_stage]            = "git-stage",
@@ -1078,7 +1095,7 @@ M._action_to_helpstr = {
   [actions.cs_delete]            = "colorscheme-delete",
   [actions.cs_update]            = "colorscheme-update",
   [actions.toggle_bg]            = "toggle-background",
-  [actions.cd]                   = "change-directory",
+  [actions.zoxide_cd]            = "change-directory",
 }
 
 return M

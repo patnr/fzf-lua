@@ -141,6 +141,36 @@ function M.setup_highlights(override)
     vim.api.nvim_set_hl(0, hl_name, hl_def)
   end
 
+  -- courtesy of fzf.vim
+  do
+    local termguicolors = vim.o.termguicolors
+    vim.api.nvim_set_hl(0, "fzf1",
+      {
+        default = true,
+        ctermfg = termguicolors and 1 or 161,
+        ctermbg = termguicolors and 8 or 238,
+        fg = "#E12672",
+        bg = "#565656"
+      })
+    vim.api.nvim_set_hl(0, "fzf2",
+      {
+        default = true,
+        ctermfg = termguicolors and 2 or 151,
+        ctermbg = termguicolors and 8 or 238,
+        fg = "#BCDDBD",
+        bg =
+        "#565656"
+      })
+    vim.api.nvim_set_hl(0, "fzf3",
+      {
+        default = true,
+        ctermfg = termguicolors and 7 or 252,
+        ctermbg = termguicolors and 8 or 238,
+        fg = "#D9D9D9",
+        bg = "#565656"
+      })
+  end
+
   -- Init the colormap singleton
   utils.COLORMAP()
 end
@@ -175,6 +205,13 @@ function M.setup(opts, do_not_reset_defaults)
       vim.deprecate(oldk, newk, "Jan 2026", "FzfLua")
     end
   end
+  -- backward compat, merge lsp.symbols into lsp.{document|workspace}_synbols
+  if opts.lsp and opts.lsp.symbols then
+    opts.lsp.document_symbols = vim.tbl_deep_extend("keep",
+      opts.lsp.document_symbols or {}, opts.lsp.symbols)
+    opts.lsp.workspace_symbols = vim.tbl_deep_extend("keep",
+      opts.lsp.workspace_symbols or {}, opts.lsp.symbols)
+  end
   -- set custom &nbsp if caller requested
   if opts.nbsp then utils.nbsp = opts.nbsp end
   -- store the setup options
@@ -191,7 +228,6 @@ M.redraw = function()
 end
 
 local lazyloaded_modules = {
-  resume = { "fzf-lua.core", "fzf_resume" },
   files = { "fzf-lua.providers.files", "files" },
   args = { "fzf-lua.providers.files", "args" },
   grep = { "fzf-lua.providers.grep", "grep" },
@@ -226,6 +262,7 @@ local lazyloaded_modules = {
   git_bcommits = { "fzf-lua.providers.git", "bcommits" },
   git_blame = { "fzf-lua.providers.git", "blame" },
   git_branches = { "fzf-lua.providers.git", "branches" },
+  git_worktrees = { "fzf-lua.providers.git", "worktrees" },
   git_tags = { "fzf-lua.providers.git", "tags" },
   oldfiles = { "fzf-lua.providers.oldfiles", "oldfiles" },
   quickfix = { "fzf-lua.providers.quickfix", "quickfix" },
@@ -294,15 +331,16 @@ local lazyloaded_modules = {
   complete_bline = { "fzf-lua.complete", "bline" },
   zoxide = { "fzf-lua.providers.files", "zoxide" },
   -- API shortcuts
-  fzf_exec = { "fzf-lua.core", "fzf_exec" },
-  fzf_live = { "fzf-lua.core", "fzf_live" },
-  fzf_wrap = { "fzf-lua.core", "fzf_wrap" },
+  resume = { "fzf-lua.core", "fzf_resume", false },
+  fzf_wrap = { "fzf-lua.core", "fzf_wrap", false },
+  fzf_exec = { "fzf-lua.core", "fzf_exec", true },
+  fzf_live = { "fzf-lua.core", "fzf_live", true },
 }
 
 for k, v in pairs(lazyloaded_modules) do
-  local v1, v2 = v[1], v[2] -- avoid reference v (table) in a function
+  local v1, v2, v3 = v[1], v[2], v[3] -- avoid reference v (table) in a function
   M[k] = function(...)
-    utils.set_info({ cmd = k, mod = v1, fnc = v2 })
+    if v3 ~= false then utils.set_info({ cmd = k, mod = v1, fnc = v2 }) end
     return require(v1)[v2](...)
   end
 end
@@ -365,6 +403,7 @@ M._excluded_meta = {
   --   man_pages -> manpages
   "help_tags",
   "man_pages",
+  "register_extension",
 }
 
 for _, m in ipairs(exported_modules) do
@@ -387,6 +426,17 @@ M.builtin = function(opts)
   return require "fzf-lua.providers.meta".metatable(opts)
 end
 
+M.register_extension = function(name, fun, default_opts, override)
+  if not override and M[name] then
+    utils.warn("Extension '%s' already exists, set 3rd arg to 'true' to override", name)
+    return
+  end
+  M.defaults[name] = utils.deepcopy(default_opts)
+  M[name] = function(...)
+    utils.set_info({ cmd = name, fnc = name })
+    return fun(...)
+  end
+end
 
 -- generate api typings
 -- for _, v in vim.spairs(exported_modules) do print(([[M.%s = require("fzf-lua.%s")]]):format(v, v)) end
@@ -435,6 +485,7 @@ M.fzf_wrap = require("fzf-lua.core").fzf_wrap
 M.git_bcommits = require("fzf-lua.providers.git").bcommits ---@type fun(opts: fzf-lua.config.GitBcommits.p?): thread?, string?, table?
 M.git_blame = require("fzf-lua.providers.git").blame ---@type fun(opts: fzf-lua.config.GitBlame.p?): thread?, string?, table?
 M.git_branches = require("fzf-lua.providers.git").branches ---@type fun(opts: fzf-lua.config.GitBranches.p?): thread?, string?, table?
+M.git_worktrees = require("fzf-lua.providers.git").worktrees ---@type fun(opts: fzf-lua.config.GitWorktrees.p?): thread?, string?, table?
 M.git_commits = require("fzf-lua.providers.git").commits ---@type fun(opts: fzf-lua.config.GitCommits.p?): thread?, string?, table?
 M.git_diff = require("fzf-lua.providers.git").diff ---@type fun(opts: fzf-lua.config.GitDiff.p?): thread?, string?, table?
 M.git_files = require("fzf-lua.providers.git").files ---@type fun(opts: fzf-lua.config.GitFiles.p?): thread?, string?, table?

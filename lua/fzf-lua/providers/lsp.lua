@@ -93,7 +93,7 @@ local function location_handler(opts, cb, _, result, ctx, _)
   -- HACK: make sure target URI is valid for buggy LSPs (#1317)
   for i, x in ipairs(result) do
     for _, k in ipairs({ "uri", "targetUri" }) do
-      if type(x[k]) == "string" and not x[k]:match("://") then
+      if type(x[k]) == "string" and not x[k]:match("^([a-zA-Z]+[a-zA-Z0-9.+-]*):.*") then
         result[i][k] = "file://" .. result[i][k]
       end
     end
@@ -233,7 +233,7 @@ local function symbol_handler(opts, cb, _, result, ctx, _)
     if (not opts.current_buffer_only or utils.CTX().bname == entry.filename) and
         (not opts._regex_filter_fn or opts._regex_filter_fn(entry, utils.CTX())) then
       local mbicon_align = 0
-      if opts.fn_reload and type(opts.query) == "string" and #opts.query > 0 then
+      if opts.is_live and type(opts.query) == "string" and #opts.query > 0 then
         -- highlight exact matches with `live_workspace_symbols` (#1028)
         local sym, text = entry.text:match("^(.+%])(.*)$")
         local pattern = "[" .. utils.lua_regex_escape(
@@ -272,13 +272,25 @@ local function symbol_handler(opts, cb, _, result, ctx, _)
             opts.__locate_pos = opts.__locate_count
           end
         end
-        local align = 48 + mbicon_align + utils.ansi_escseq_len(symbol)
-        -- TODO: string.format %-{n}s fails with align > ~100?
-        -- entry1 = string.format("%-" .. align .. "s%s%s", symbol, utils.nbsp, entry1)
-        if align > #symbol then
-          symbol = symbol .. string.rep(" ", align - #symbol)
+        if opts.__sym_bufnr and not opts.pickers then -- use old format on "global" picker
+          -- document_symbols
+          entry1 = string.format("[%s]%s%s:%s:%s\t\t%s",
+            utils.ansi_codes[opts.hls.buf_nr](tostring(opts.__sym_bufnr)),
+            utils.nbsp,
+            utils.ansi_codes[opts.hls.buf_name](opts.__sym_bufname),
+            utils.ansi_codes[opts.hls.buf_linenr](tostring(entry.lnum)),
+            utils.ansi_codes[opts.hls.path_colnr](tostring(entry.col)),
+            symbol)
+        else
+          -- workspace_symbols
+          local align = 48 + mbicon_align + utils.ansi_escseq_len(symbol)
+          -- TODO: string.format %-{n}s fails with align > ~100?
+          -- entry1 = string.format("%-" .. align .. "s%s%s", symbol, utils.nbsp, entry1)
+          if align > #symbol then
+            symbol = symbol .. string.rep(" ", align - #symbol)
+          end
+          entry1 = symbol .. utils.nbsp .. entry1
         end
-        entry1 = symbol .. utils.nbsp .. entry1
         cb(entry1)
       end
     end
@@ -422,7 +434,7 @@ local function gen_lsp_contents(opts)
         end
       end
       if utils.tbl_isempty(results) then
-        if opts.fn_reload then
+        if opts.is_live then
           -- return an empty set or the results wouldn't be
           -- cleared on live_workspace_symbols (#468)
           opts.__contents = {}
@@ -473,8 +485,8 @@ local function gen_lsp_contents(opts)
           -- is returned, important for `live_workspace_symbols` when the user
           -- inputs a query that returns no results
           -- also used with `finder` to prevent the window from being closed
-          no_autoclose  = opts.no_autoclose or opts.fn_reload,
-          silent        = opts.silent or opts.fn_reload,
+          no_autoclose  = opts.no_autoclose or opts.is_live,
+          silent        = opts.silent or opts.is_live,
         }
 
         -- when used with 'live_workspace_symbols'
@@ -558,13 +570,18 @@ end
 
 -- see $VIMRUNTIME/lua/vim/buf.lua:pick_call_hierarchy_item()
 local function gen_lsp_contents_call_hierarchy(opts)
+  local timeout = 5000
+  if type(opts.async_or_timeout) == "number" then
+    timeout = opts.async_or_timeout
+  end
   local lsp_params = opts.lsp_params
       ---@diagnostic disable-next-line: missing-parameter
       or not utils.__HAS_NVIM_011 and vim.lsp.util.make_position_params(utils.CTX().winid)
       or function(client)
         return vim.lsp.util.make_position_params(utils.CTX().winid, client.offset_encoding)
       end
-  local res, err = vim.lsp.buf_request_sync(0, opts.lsp_handler.prep, lsp_params, 2000)
+  local res, err = vim.lsp.buf_request_sync(
+    utils.CTX().bufnr, opts.lsp_handler.prep, lsp_params, timeout)
   if err then
     utils.error(("Error executing '%s': %s"):format(opts.lsp_handler.prep, err))
   else
@@ -613,7 +630,6 @@ local function fzf_lsp_locations(opts, fn_contents)
     utils.clear_CTX()
     return
   end
-  opts = core.set_header(opts, opts.headers or { "cwd", "regex_filter" })
   return core.fzf_exec(opts.__contents, opts)
 end
 
@@ -691,7 +707,6 @@ M.finder = function(opts)
     utils.clear_CTX()
     return
   end
-  opts = core.set_header(opts, opts.headers or { "cwd", "regex_filter" })
   opts = core.set_fzf_field_index(opts)
   return core.fzf_exec(contents, opts)
 end
@@ -729,26 +744,12 @@ local function gen_sym2style_map(opts)
 end
 
 M.document_symbols = function(opts)
-  ---@type fzf-lua.config.LspSymbols
-  opts = normalize_lsp_opts(opts, "lsp.symbols", "lsp_document_symbols")
+  ---@type fzf-lua.config.LspDocumentSymbols
+  opts = normalize_lsp_opts(opts, "lsp.document_symbols")
   if not opts then return end
-  -- no support for sym_lsym
-  for k, fn in pairs(opts.actions or {}) do
-    if type(fn) == "table" and
-        (fn[1] == actions.sym_lsym or fn.fn == actions.sym_lsym) then
-      opts.actions[k] = nil
-    end
-  end
-  opts = core.set_header(opts, opts.headers or { "regex_filter" })
+  opts.__sym_bufnr = utils.CTX().bufnr
+  opts.__sym_bufname = utils.nvim_buf_get_name(opts.__sym_bufnr)
   opts = core.set_fzf_field_index(opts)
-  if not opts.fzf_opts or opts.fzf_opts["--with-nth"] == nil then
-    -- our delims are {nbsp,:} make sure entry has no icons
-    -- "{nbsp}file:line:col:" and hide the last 4 fields
-    opts.git_icons = false
-    opts.file_icons = false
-    opts.fzf_opts = opts.fzf_opts or {}
-    opts.fzf_opts["--with-nth"] = "..-4"
-  end
   if opts.symbol_style or opts.symbol_fmt then
     M._sym2style = nil
     gen_sym2style_map(opts)
@@ -763,14 +764,13 @@ end
 
 M.workspace_symbols = function(opts)
   ---@type fzf-lua.config.LspWorkspaceSymbols
-  opts = normalize_lsp_opts(opts, "lsp.symbols", "lsp_workspace_symbols")
+  opts = normalize_lsp_opts(opts, "lsp.workspace_symbols")
   if not opts then return end
   opts.locate = false -- Makes no sense for workspace symbols
   opts.__ACT_TO = opts.__ACT_TO or M.live_workspace_symbols
   opts.__call_fn = utils.__FNCREF__()
   opts.lsp_params = { query = opts.lsp_query or "" }
-  opts = core.set_header(opts, opts.headers or
-    { "actions", "cwd", "lsp_query", "regex_filter" })
+  if type(opts._headers) == "table" then table.insert(opts._headers, "lsp_query") end
   opts = core.set_fzf_field_index(opts)
   opts = gen_lsp_contents(opts)
   if not opts.__contents then
@@ -790,7 +790,7 @@ end
 
 M.live_workspace_symbols = function(opts)
   ---@type fzf-lua.config.LspLiveWorkspaceSymbols
-  opts = normalize_lsp_opts(opts, "lsp.symbols", "lsp_workspace_symbols")
+  opts = normalize_lsp_opts(opts, "lsp.workspace_symbols")
   if not opts then return end
 
   -- needed by 'actions.sym_lsym'
@@ -834,7 +834,6 @@ M.live_workspace_symbols = function(opts)
   opts.lsp_params = { query = opts.lsp_query or opts.query or "" }
   opts.query = opts.lsp_query or opts.query
 
-  opts = core.set_header(opts, opts.headers or { "actions", "cwd", "regex_filter" })
   opts = core.set_fzf_field_index(opts)
   if opts.symbol_style or opts.symbol_fmt then
     M._sym2style = nil
@@ -895,7 +894,7 @@ local function wrap_fn(key, fn)
     opts.lsp_handler.capability = opts.lsp_handler.server_capability
 
     -- check_capabilities will print the appropriate warning
-    if not check_capabilities(opts.lsp_handler) then
+    if not check_capabilities(opts.lsp_handler, opts.silent) then
       return
     end
 

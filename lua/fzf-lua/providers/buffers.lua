@@ -73,7 +73,8 @@ local getbuf = function(buf)
     flag = (buf == utils.CTX().bufnr and "%")
         or (buf == utils.CTX().alt_bufnr and "#") or " ",
     info = utils.getbufinfo(buf),
-    readonly = vim.bo[buf].readonly
+    readonly = vim.bo[buf].readonly,
+    loaded = vim.api.nvim_buf_is_loaded(buf),
   }
 end
 
@@ -131,8 +132,7 @@ end
 
 
 local function gen_buffer_entry(opts, buf, max_bufnr, cwd, prefix)
-  -- local hidden = buf.info.hidden == 1 and 'h' or 'a'
-  local hidden = ""
+  local hidden = buf.info.hidden == 1 and "h" or buf.loaded and "a" or " "
   local readonly = buf.readonly and "=" or " "
   local changed = buf.info.changed == 1 and "+" or " "
   local flags = hidden .. readonly .. changed
@@ -140,15 +140,14 @@ local function gen_buffer_entry(opts, buf, max_bufnr, cwd, prefix)
   local rightbr = "]"
   local bufname = (function()
     local bname = buf.info.name
-    if bname:match("^%[.*%]$") or bname:match("^%a+://") then
+    if bname:match("^%[.*%]$") or path.is_uri(bname) then
       return bname
     elseif opts.filename_only then
       return path.tail(bname)
     else
       bname = make_entry.lcol({ filename = bname, lnum = buf.info.lnum }, opts):gsub(":$", "")
-      return make_entry.file(bname, vim.tbl_extend("force", opts,
-        -- No support for git_icons, file_icons are added later
-        { cwd = cwd or opts.cwd or uv.cwd(), file_icons = false, git_icons = false }))
+      return make_entry.file(bname,
+        vim.tbl_extend("force", opts, { cwd = cwd or opts.cwd or uv.cwd() }))
     end
   end)()
   if buf.flag == "%" then
@@ -161,15 +160,6 @@ local function gen_buffer_entry(opts, buf, max_bufnr, cwd, prefix)
   local bufnrstr = string.format("%s%s%s", leftbr,
     utils.ansi_codes[opts.hls.buf_nr](tostring(buf.bufnr)), rightbr)
   local buficon = ""
-  local hl = ""
-  if opts.file_icons then
-    buficon, hl = devicons.get_devicon(buf.info.name,
-      -- shell-like icon for terminal buffers
-      utils.is_term_bufname(buf.info.name) and "sh" or nil)
-    if hl and opts.color_icons then
-      buficon = utils.ansi_from_rgb(hl, buficon)
-    end
-  end
   local max_bufnr_w = 3 + #tostring(max_bufnr) + utils.ansi_escseq_len(bufnrstr)
   local item_str = string.format("%s%s%s%s%s%s%s%s",
     prefix or "",
@@ -205,7 +195,6 @@ M.buffers = function(opts)
   opts.fzf_opts["--header-lines"] = opts.fzf_opts["--header-lines"] == nil
       and (not opts.ignore_current_buffer and opts.sort_lastused) and "1" or nil
 
-  opts = core.set_header(opts, opts.headers or { "actions", "cwd" })
   opts = opts.filename_only and opts or core.set_fzf_field_index(opts)
 
   return core.fzf_exec(contents, opts)
@@ -425,7 +414,7 @@ M.tabs = function(opts)
 
         local tab_cwd_tilde_base64 = base64.encode(tab_cwd_tilde)
         if not opts.current_tab_only then
-          cb(string.format("%s:%d:%d:0)%s%s  %s",
+          cb(string.format("%s\t%d\t%d\t0)%s%s  %s",
             tab_cwd_tilde_base64,
             tabnr,
             tabh,
@@ -438,7 +427,7 @@ M.tabs = function(opts)
           if tabh ~= utils.CTX().tabh or utils.CTX().curtab_wins[tostring(w)] then
             local b = filter_buffers(opts, { vim.api.nvim_win_get_buf(w) })[1]
             if b then
-              local prefix = string.format("%s:%d:%d:%d)%s%s%s",
+              local prefix = string.format("%s\t%d\t%d\t%d)%s%s%s",
                 tab_cwd_tilde_base64, tabnr, tabh, w, utils.nbsp, utils.nbsp, utils.nbsp)
               local bufinfo = populate_buffer_entries({}, { b }, w)[1]
               cb(gen_buffer_entry(opts, bufinfo, max_bufnr, tab_cwd, prefix))
@@ -450,7 +439,6 @@ M.tabs = function(opts)
     cb(nil)
   end
 
-  opts = core.set_header(opts, opts.headers or { "actions", "cwd" })
   opts = opts.filename_only and opts or core.set_fzf_field_index(opts, "{4}", "{}")
 
   return core.fzf_exec(contents, opts)
@@ -479,7 +467,7 @@ M.treesitter = function(opts)
   local ft = vim.bo[bufnr0].ft
   local lang = ts.language.get_lang(ft) or ft
   if not utils.has_ts_parser(lang) then
-    utils.info("No treesitter parser found for '%s' (bufnr=%d).", bufname0, bufnr0)
+    utils.info("No treesitter parser found for '%s' (bufnr=%d)", bufname0, bufnr0)
     return
   end
 
@@ -495,7 +483,10 @@ M.treesitter = function(opts)
   if not root then return end
 
   local query = (ts.query.get(lang, "locals"))
-  if not query then return end
+  if not query then
+    utils.warn([[ts.query.get("%s","locals") returned nil]], lang)
+    return
+  end
 
   local get = function(bufnr)
     local definitions = {}
@@ -585,8 +576,6 @@ M.treesitter = function(opts)
     end)()
   end
 
-  opts = core.set_header(opts, opts.headers or { "actions" })
-
   return core.fzf_exec(contents, opts)
 end
 
@@ -635,62 +624,71 @@ M.spellcheck = function(opts)
       -- wait for vim.schedule
       coroutine.yield()
 
-      local offset = 0
-      local start_line = opts.start_line or 1
-      local end_line = opts.end_line or #data
-      local lines = end_line - start_line + 1
+      vim.schedule(function()
+        -- :help vim.spell.check
+        --   The behaviour of this function is dependent on: 'spelllang',
+        --   'spellfile', 'spellcapcheck' and 'spelloptions' which can all be local to
+        --   the buffer. Consider calling this with |nvim_buf_call()|.
+        vim.api.nvim_buf_call(bufnr0, function()
+          local offset = 0
+          local start_line = opts.start_line or 1
+          local end_line = opts.end_line or #data
+          local lines = end_line - start_line + 1
 
-      if opts.start == "cursor" then
-        -- start display from current line and wrap from bottom
-        offset = utils.CTX().cursor[1] - start_line
-      end
-
-      for i = 1, lines do
-        local lnum = i + offset
-        if lnum > lines then
-          lnum = lnum % lines
-        end
-        lnum = lnum + start_line - 1
-
-        local line, from, to = data[lnum], 1, nil
-        repeat
-          local word_separator = opts.word_separator or "[%s%p]"
-          local function trim(s)
-            return s:gsub("^" .. word_separator .. "+", ""):gsub(word_separator .. "+$", "")
+          if opts.start == "cursor" then
+            -- start display from current line and wrap from bottom
+            offset = utils.CTX().cursor[1] - start_line
           end
-          from, to = string.find(line, "%w+", from)
-          local word = from and string.sub(line, from, to) or ""
-          local prefix = from and string.sub(line, from - 1, from - 1) or ""
-          local postfix = to and string.sub(line, to + 1, to + 1) or ""
-          local valid_word = word
-              and (#prefix == 0 or prefix:match("^" .. word_separator))
-              and (#postfix == 0 or postfix:match(word_separator .. "$"))
-          if valid_word then
-            local _, lead = word:find("^" .. word_separator .. "+")
-            local spell = vim.spell.check(trim(word))[1]
-            if spell then
-              cb(string.format("[%s]%s%s:%s:%s\t\t%s",
-                utils.ansi_codes[opts.hls.buf_nr](tostring(bufnr0)),
-                utils.nbsp,
-                utils.ansi_codes[opts.hls.buf_name](bufname0),
-                utils.ansi_codes[opts.hls.buf_linenr](tostring(lnum)),
-                utils.ansi_codes[opts.hls.path_colnr](tostring(from + (lead or 0))),
-                trim(word)
-              ), function(err)
-                coroutine.resume(co)
-                if err then cb(nil) end
-              end)
-              coroutine.yield()
+
+          for i = 1, lines do
+            local lnum = i + offset
+            if lnum > lines then
+              lnum = lnum % lines
             end
+            lnum = lnum + start_line - 1
+
+            local line, from, to = data[lnum], 1, nil
+            repeat
+              local word_separator = opts.word_separator or "[%s%p]"
+              local function trim(s)
+                return s:gsub("^" .. word_separator .. "+", ""):gsub(word_separator .. "+$", "")
+              end
+              from, to = string.find(line, "[^%s^%p^%d^%c^%z]+", from)
+              local word = from and string.sub(line, from, to) or ""
+              local prefix = from and string.sub(line, from - 1, from - 1) or ""
+              local postfix = to and string.sub(line, to + 1, to + 1) or ""
+              local valid_word = word
+                  and (#prefix == 0 or prefix:match("^" .. word_separator))
+                  and (#postfix == 0 or postfix:match(word_separator .. "$"))
+              if valid_word then
+                local _, lead = word:find("^" .. word_separator .. "+")
+                local spell = vim.spell.check(trim(word))[1]
+                if spell then
+                  cb(string.format("[%s]%s%s:%s:%-26s\t\t%s",
+                    utils.ansi_codes[opts.hls.buf_nr](tostring(bufnr0)),
+                    utils.nbsp,
+                    utils.ansi_codes[opts.hls.buf_name](bufname0),
+                    utils.ansi_codes[opts.hls.buf_linenr](tostring(lnum)),
+                    utils.ansi_codes[opts.hls.path_colnr](tostring(from + (lead or 0))),
+                    trim(word)
+                  ), function(err)
+                    -- coroutine.resume(co)
+                    if err then cb(nil) end
+                  end)
+                  -- attempt to yield across C-call boundar
+                  -- coroutine.yield()
+                end
+              end
+              if from then from = to + 1 end
+            until not from
           end
-          if from then from = to + 1 end
-        until not from
-      end
-      cb(nil)
+          cb(nil)
+          coroutine.resume(co)
+        end)
+      end)
+      coroutine.yield()
     end)()
   end
-
-  opts = core.set_header(opts, opts.headers or { "actions" })
 
   return core.fzf_exec(contents, opts)
 end

@@ -45,7 +45,7 @@ M.ACTION_DEFINITIONS = {
   },
   [actions.grep_lgrep]        = {
     function(o)
-      if o.fn_reload then
+      if o.is_live then
         return "Fuzzy Search"
       else
         return "Regex Search"
@@ -54,7 +54,7 @@ M.ACTION_DEFINITIONS = {
   },
   [actions.sym_lsym]          = {
     function(o)
-      if o.fn_reload then
+      if o.is_live then
         return "Fuzzy Search"
       else
         return "Live Query"
@@ -105,6 +105,7 @@ local contents_from_arr = function(cont_arr)
         or t.contents)
     end
   elseif cont_type == "function" then
+    ---@type fzf-lua.fncContent
     contents = function(fzf_cb)
       coroutine.wrap(function()
         local co = coroutine.running()
@@ -137,11 +138,13 @@ local contents_from_arr = function(cont_arr)
   return contents
 end
 
----@alias content (string|number)[]|fun(fzf_cb: fun(entry?: string|number, cb?: function))|string|nil
+---@alias fzf-lua.fzfCb fun(entry?: string|number, cb?: function)
+---@alias fzf-lua.fncContent fun(wnl: fzf-lua.fzfCb, w: fzf-lua.fzfCb)
+---@alias fzf-lua.content fzf-lua.fncContent|(string|number)[]|string
 
 -- Main API, see:
 -- https://github.com/ibhagwan/fzf-lua/wiki/Advanced
----@param contents content
+---@param contents fzf-lua.content
 ---@param opts? fzf-lua.config.Base|{}
 ---@return thread?, string?, table?
 M.fzf_exec = function(contents, opts)
@@ -151,72 +154,72 @@ M.fzf_exec = function(contents, opts)
   if type(contents) == "table" and type(contents[1]) == "table" then
     contents = contents_from_arr(contents)
   end
-  -- stringify_mt: the wrapped multiprocess command is independent, most of it's
-  -- options are serialized as strings and the rest are read from the main instance
-  -- config over RPC, if the command doesn't require any processing it will be piped
-  -- directly to fzf using $FZF_DEFAULT_COMMAND
-  local mt = (opts.multiprocess ~= false and type(contents) == "string")
-  local cmd = mt and shell.stringify_mt(contents --[[@as string]], opts)
+  local cmd = shell.stringify_mt(contents, opts)
       or shell.stringify(contents, opts, nil)
-  -- Contents sent to fzf can only be nil or a shell command (string)
-  -- the API accepts both tables and functions which we "stringify"
-  -- We also send string commands as stringify is also responsible
-  -- for multiprocess wrapping of shell commands with processing
   return M.fzf_wrap(cmd, opts, true)
+end
+
+local nop = function(opts)
+  return not opts.fn_transform
+      and not opts.fn_preprocess
+      and not opts.fn_postprocess
 end
 
 ---@param opts table
 ---@return boolean
 M.can_transform = function(opts)
   return utils.has(opts, "fzf", { 0, 45 })
+      and opts.is_live -- currently only used for "live" picker
       and opts.rg_glob
       and not opts.multiprocess
-      and not opts.fn_transform
-      and not opts.fn_preprocess
-      and not opts.fn_postprocess
+      and nop(opts)
 end
 
----@param contents string|fun(query: string[]): string|string[]|function?
----@param opts? table
+-- Append query placeholder if not found in command
+local add_query_placeholder = function(cmd)
+  if type(cmd) ~= "string" or cmd:match(M.fzf_query_placeholder) then return cmd end
+  return ("%s %s"):format(((cmd):gsub("%s*$", "")), M.fzf_query_placeholder)
+end
+
+---@param contents string|fzf-lua.shell.data2
+---@return fzf-lua.shell.data2
+local cmd2fnc = function(contents)
+  if type(contents) == "function" then return contents end
+  -- Append query placeholder if not found in command
+  local cmd = add_query_placeholder(contents)
+  return function(args, _)
+    local query = args[1] or ""
+    query = (query:gsub("%%", "%%%%"))
+    query = libuv.shellescape(query)
+    return M.expand_query(cmd, query)
+  end
+end
+
+-- AKA "live": fzf acts as a selector only (fuzzy matching is disabled)
+-- each keypress reloads fzf's input usually based on the typed query
+-- utilizes fzf's 'change:reload' event or skim's "interactive" mode
+---@param contents string|fzf-lua.shell.data2
+---@param opts? fzf-lua.config.Base|{}
 ---@return thread?, string?, table?
 M.fzf_live = function(contents, opts)
-  opts = config.normalize_opts(opts or {}, {})
+  opts = opts or {}
+  opts.is_live = true
+  opts = config.normalize_opts(opts, {})
   if not opts then return end
-  opts.fn_reload = contents
-  -- AKA "live": fzf acts as a selector only (fuzzy matching is disabled)
-  -- each keypress reloads fzf's input usually based on the typed query
-  -- utilizes fzf's 'change:reload' event or skim's "interactive" mode
-  -- convert "reload" actions to fzf's `reload` binds
-  -- convert "exec_silent" actions to fzf's `execute-silent` binds
-  if type(contents) == "string" then
-    -- Signal to stringify_mt we are relocating <query>
-    -- Signal to preprocess we are looking to replace {argvz}
-    -- Append query placeholder if not found in command
-    opts.argv_expr = opts.multiprocess
-    if not contents:match(M.fzf_query_placeholder) then
-      contents = ("%s %s"):format(contents, M.fzf_query_placeholder)
-    end
-  end
   local fzf_field_index = M.fzf_field_index(opts)
+  local cmd ---@type string
   if type(contents) == "function" and M.can_transform(opts) then
-    local cmd = shell.stringify_data(contents, opts, fzf_field_index)
-    M.setup_fzf_live_flags(cmd, fzf_field_index, opts)
-    return M.fzf_wrap(utils.shell_nop(), opts, true)
+    cmd = shell.stringify_data(
+      function(items) return contents(items, opts) end, opts, fzf_field_index)
+  else
+    contents = add_query_placeholder(contents)
+    local mtcmd = shell.stringify_mt(contents, opts)
+    cmd = mtcmd and M.expand_query(mtcmd, fzf_field_index)
+        or type(contents) == "string" and nop(opts) and M.expand_query(contents, fzf_field_index)
+        or shell.stringify(cmd2fnc(contents), opts, fzf_field_index)
   end
-  local cmd0 = contents ---@type string
-  local func_contents = type(contents) == "function"
-      and contents or function(args)
-        local query = args[1] or ""
-        query = (query:gsub("%%", "%%%%"))
-        query = libuv.shellescape(query)
-        return M.expand_query(cmd0, query)
-      end
-  local mt = (opts.multiprocess ~= false and type(contents) == "string")
-  local cmd = mt and shell.stringify_mt(contents, opts) or
-      shell.stringify(func_contents, opts, fzf_field_index)
-  cmd = mt and M.expand_query(cmd, fzf_field_index) or cmd
-  M.setup_fzf_live_flags(cmd, fzf_field_index, opts)
-  return M.fzf_wrap(utils.shell_nop(), opts, true)
+  M.setup_fzf_live_flags(cmd, opts)
+  return M.fzf_wrap(cmd, opts, true)
 end
 
 M.fzf_resume = function(opts)
@@ -228,7 +231,6 @@ M.fzf_resume = function(opts)
   end
   opts = utils.tbl_deep_extend("force", config.__resume_data.opts, opts or {})
   assert(opts == config.__resume_data.opts)
-  opts = M.set_header(opts, opts.headers or {})
   opts.cwd = opts.cwd and libuv.expand(opts.cwd) or nil
   M.fzf_wrap(config.__resume_data.contents, config.__resume_data.opts)
 end
@@ -236,52 +238,57 @@ end
 ---@param cmd string?
 ---@param opts table
 ---@param convert_actions boolean?
----@return thread, string, table
+---@return thread?, string, table
 M.fzf_wrap = function(cmd, opts, convert_actions)
   opts = opts or {}
+  M.set_header(opts)
   if convert_actions and type(opts.actions) == "table" then
     opts = M.convert_reload_actions(cmd, opts)
     opts = M.convert_exec_silent_actions(opts)
   end
-  local _co
-  local wrapped = coroutine.wrap(function()
-    _co = coroutine.running()
-    if type(opts.cb_co) == "function" then opts.cb_co(_co) end
-    -- Default fzf exit callback acts upon the selected items
-    local selected = M.fzf(cmd, opts)
-    local fn_selected = opts.fn_selected or actions.act
-    if not fn_selected then return end
-    -- errors thrown here gets silenced possibly
-    -- due to a coroutine, so catch explicitly
-    local _, err = pcall(fn_selected, selected, opts)
-    -- ignore existing swap file error, the choices dialog will still be
-    -- displayed to user to make a selection once fzf-lua exits (#1011)
-    if err and err:match("Vim%(edit%):E325") then
-      return
-    end
-    utils.error("fn_selected threw an error: " .. debug.traceback(err, 1))
-  end)
   -- Do not strt fzf, return the stringified contents and opts onlu
   -- used by the "combine" picker to merge inputs
-  if opts._start ~= false then
-    wrapped()
-  end
+  if opts._start == false then return nil, cmd, opts end
+  local _co, fn_selected
+  coroutine.wrap(function()
+    _co = coroutine.running()
+    -- xpcall to get full traceback https://www.lua.org/pil/8.5.html
+    local _, err = (jit and xpcall or require("fzf-lua.lib.copcall").xpcall)(function()
+      if type(opts.cb_co) == "function" then opts.cb_co(_co) end
+      local selected, exit_code = M.fzf(cmd, opts)
+      -- If aborted (e.g. unhide process kill), do nothing
+      if not tonumber(exit_code) then return end
+      -- Default fzf exit callback acts upon the selected items
+      fn_selected = opts.fn_selected or actions.act
+      if not fn_selected then return end
+      -- errors thrown here gets silenced possibly
+      -- due to a coroutine, so catch explicitly
+      fn_selected(selected, opts)
+    end, debug.traceback)
+    -- ignore existing swap file error, the choices dialog will still be
+    -- displayed to user to make a selection once fzf-lua exits (#1011)
+    if err then
+      if fn_selected and err:match("Vim%(edit%):E325") then return end
+      utils.error("fn_selected threw an error: " .. err)
+    end
+  end)()
   return _co, cmd, opts
 end
 
 ---@param contents string?
 ---@param opts {}?
 ---@return string[]?
+---@return integer? exit_code
 M.fzf = function(contents, opts)
   -- Disable opening from the command-line window `:q`
   -- creates all kinds of issues, will fail on `nvim_win_close`
   if vim.fn.win_gettype() == "command" then
     utils.info("Unable to open from the command-line window. See `:help E11`.")
-    return
+    return nil, nil
   end
   -- normalize with globals if not already normalized
   opts = config.normalize_opts(opts or {}, {})
-  if not opts then return end
+  if not opts then return nil, nil end
   -- Store contents for unhide
   opts._contents = contents
   -- flag used to print the query on stdout line 1
@@ -313,6 +320,7 @@ M.fzf = function(contents, opts)
   -- update context and save a copy in options (for actions)
   -- call before creating the window or fzf_winobj is not nil
   opts.__CTX = utils.CTX(opts._ctx)
+  opts.__INFO = FzfLua.get_info()
 
   -- setup the fzf window and preview layout
   local fzf_win = win:new(opts)
@@ -321,61 +329,69 @@ M.fzf = function(contents, opts)
   if previewer then
     -- Attach the previewer to the windows
     fzf_win:attach_previewer(previewer)
-    -- Set the preview command line
-    opts.preview = previewer:cmdline()
-    -- fzf 0.40 added 'zero' event for when there's no match
-    -- clears the preview when there are no matching entries
-    if utils.has(opts, "fzf", { 0, 40 }) and previewer.zero then
-      table.insert(opts._fzf_cli_args, "--bind="
-        .. libuv.shellescape("zero:+" .. previewer:zero()))
+    -- Setup --preview/--preview-window/--bind=zero:... etc
+    if type(previewer.setup_opts) == "function" then
+      opts = previewer:setup_opts(opts)
     end
-    if type(previewer.preview_window) == "function" then
-      -- do we need to override the preview_window args?
-      -- this can happen with the builtin previewer
-      -- (1) when using a split we use the previewer as placeholder
-      -- (2) we use 'nohidden:right:0' to trigger preview function
-      --     calls without displaying the native fzf previewer split
-      opts.fzf_opts["--preview-window"] = previewer:preview_window()
-    end
-    -- provides preview offset when using native previewers
-    -- (bat/cat/etc) with providers that supply line numbers
-    -- (grep/quickfix/LSP)
-    if type(previewer.fzf_delimiter) == "function" then
-      opts.fzf_opts["--delimiter"] = previewer:fzf_delimiter()
-    end
-    if opts.preview_offset == nil and type(previewer._preview_offset) == "function" then
-      opts.preview_offset = previewer:_preview_offset()
-    end
+  elseif opts.preview and type(opts.preview) ~= "string" then
+    opts.preview = require("fzf-lua.previewer").normalize_spec(opts.preview, opts)
   elseif not opts.preview and not opts.fzf_opts["--preview"] then
     -- no preview available, override in case $FZF_DEFAULT_OPTS
     -- contains a preview which will most likely fail
     opts.fzf_opts["--preview-window"] = "hidden:right:0"
   end
 
+  -- Create the window before we calculate the preview window layout
   local fzf_bufnr = fzf_win:create()
-  local selected, exit_code = fzf.raw_fzf(contents, M.build_fzf_cli(opts, fzf_win),
+
+  -- setup layout for native previewers / split win background dummy preview
+  if opts.fzf_opts["--preview-window"] == nil then
+    opts.fzf_opts["--preview-window"] = M.preview_window(opts, fzf_win)
+  end
+
+  if utils.has(opts, "fzf", { 0, 46 })
+      and opts.winopts.preview.layout == "flex"
+      and tonumber(opts.winopts.preview.flip_columns) > 0
+      -- Only enable flex layout native rotate if native previewer size > 0
+      and not (opts.fzf_opts["--preview-window"] or ""):match(":0")
+  then
+    win.on_SIGWINCH(opts, nil, function(args)
+      -- Only set the layout if preview isn't hidden
+      if not tonumber(args[1]) then return end
+      -- NOTE: do not use local ref `fzf_win` as it my change on resume (#2255)
+      local winobj = utils.fzf_winobj()
+      if not winobj then return end
+      return string.format("change-preview-window(%s)", winobj:normalize_preview_layout().str)
+    end)
+  end
+
+  -- live command may contain field index {q}, cannot be used as FZF_DEFAULT_COMMAND
+  local selected, exit_code = fzf.raw_fzf(opts.is_live and utils.shell_nop() or contents,
+    M.build_fzf_cli(opts),
     {
       fzf_bin = opts.fzf_bin,
       cwd = opts.cwd,
       pipe_cmd = opts.pipe_cmd,
       silent_fail = opts.silent_fail,
       is_fzf_tmux = opts._is_fzf_tmux,
-      debug = opts.debug == true or opts.debug == "verbose",
+      debug = opts.debug,
       RIPGREP_CONFIG_PATH = opts.RIPGREP_CONFIG_PATH,
     })
   -- kill fzf piped process PID
   -- NOTE: might be an overkill since we're using $FZF_DEFAULT_COMMAND
   -- to spawn the piped process and fzf is responsible for termination
   -- when the fzf process exists
-  if tonumber(opts.__pid) then
-    libuv.process_kill(opts.__pid)
+  -- NOTE: can be an empty table due to tbl_deep_clone (#2260)
+  if opts.PidObject and opts.PidObject.get then
+    libuv.process_kill(opts.PidObject:get())
+    opts.PidObject:set(nil)
   end
   -- If a hidden process was killed by [re-]starting a new picker do nothing
-  if fzf_win:was_hidden() then return end
+  if fzf_win:was_hidden() then return nil, nil end
   -- This was added by 'resume': when '--print-query' is specified
   -- we are guaranteed to have the query in the first line, save&remove it
   if selected and #selected > 0 then
-    if not (opts._is_skim and opts.fn_reload) then
+    if not (opts._is_skim and opts.is_live) then
       -- reminder: this doesn't get called with 'live_grep' when using skim
       -- due to a bug where '--print-query --interactive' combo is broken:
       -- skim always prints an empty line where the typed query should be.
@@ -401,10 +417,13 @@ M.fzf = function(contents, opts)
       utils.clear_CTX()
     end
   end
-  return selected
+  return selected, exit_code
 end
 
 -- Best approximation of neovim border types to fzf border types
+---@param winopts fzf-lua.config.Winopts|{}
+---@param metadata fzf-lua.win.borderMetadata
+---@return string|table
 local function translate_border(winopts, metadata)
   local neovim2fzf = {
     none       = "noborder",
@@ -444,12 +463,15 @@ M.preview_window = function(o, fzf_win)
         local preview_str = fzf_win:fzf_preview_layout_str()
         local preview_pos = preview_str:match("[^:]+") or "right"
         return translate_border(o.winopts.preview,
-          { type = "fzf", name = "prev", layout = preview_pos })
+          { type = "fzf", name = "prev", layout = preview_pos, opts = o })
       end)()
       return border and string.format(":%s", border) or ""
     end)()
   )
   if utils.has(o, "fzf", { 0, 31 })
+      -- fzf v0.45 added transform, v0.46 added resize event
+      -- which we use for changing the layout on resize
+      and not utils.has(o, "fzf", { 0, 46 })
       and o.winopts.preview.layout == "flex"
       and tonumber(o.winopts.preview.flip_columns) > 0
   then
@@ -460,8 +482,12 @@ M.preview_window = function(o, fzf_win)
     -- NOTE: sending `true` as first arg gets the no fullscreen width, otherwise we'll get
     -- incosstent behavior when starting fullscreen
     local columns = fzf_win:columns(true)
-    local fzf_prev_percent = tonumber(o.winopts.preview.horizontal:match(":(%d+)%%")) or 50
-    local fzf_main_width = math.ceil(columns * (100 - fzf_prev_percent) / 100)
+    local fzf_prev_percent = tonumber(o.winopts.preview.horizontal:match(":(%d+)%%"))
+    local fzf_prev_width = not fzf_prev_percent and
+        tonumber(o.winopts.preview.horizontal:match(":(%d+)")) or nil
+    fzf_prev_percent = fzf_prev_percent or 50
+    local fzf_main_width = fzf_prev_width and (columns - fzf_prev_width)
+        or math.ceil(columns * (100 - fzf_prev_percent) / 100)
     local horizontal_min_width = o.winopts.preview.flip_columns - fzf_main_width + 1
     if horizontal_min_width > 0 then
       layout = string.format("%s:%s,<%d(%s:%s)",
@@ -472,15 +498,22 @@ M.preview_window = function(o, fzf_win)
   if not layout then
     layout = string.format("%s:%s", prefix, fzf_win:fzf_preview_layout_str())
   end
+  if o.preview_offset and #o.preview_offset > 0 then
+    layout = layout .. ":" .. o.preview_offset
+  end
   return layout
 end
 
 -- Create fzf --color arguments from a table of vim highlight groups.
 M.create_fzf_colors = function(opts)
+  -- In case the user already set fzf_opts["--color"] (#1052)
+  if opts.fzf_opts and type(opts.fzf_opts["--color"]) == "string" then
+    table.insert(opts._fzf_cli_args, "--color=" .. opts.fzf_opts["--color"])
+  end
   if type(opts.fzf_colors) ~= "table" then return end
   local colors = opts.fzf_colors
 
-  if opts.fn_reload then
+  if opts.is_live then
     colors.query = { "fg", opts.hls.live_prompt }
   end
 
@@ -493,11 +526,6 @@ M.create_fzf_colors = function(opts)
   end
 
   local tbl = {}
-
-  -- In case the user already set fzf_opts["--color"] (#1052)
-  if opts.fzf_colors and type(opts.fzf_colors["--color"]) == "string" then
-    table.insert(tbl, opts.fzf_opts["--color"])
-  end
 
   for flag, list in pairs(colors) do
     if type(list) == "table" then
@@ -588,37 +616,13 @@ M.create_fzf_binds = function(opts)
 end
 
 ---@param opts table
----@param fzf_win fzf-lua.Win
 ---@return string[]
-M.build_fzf_cli = function(opts, fzf_win)
+M.build_fzf_cli = function(opts)
   -- below options can be specified directly in opts and will be
   -- prioritized: opts.<name> is prioritized over fzf_opts["--name"]
   for _, flag in ipairs({ "query", "prompt", "header", "preview" }) do
     if opts[flag] ~= nil then
       opts.fzf_opts["--" .. flag] = opts[flag]
-    end
-  end
-  -- convert preview action functions to strings using our shell wrapper
-  do
-    local preview_cmd
-    local preview_spec = opts.fzf_opts["--preview"]
-    if type(preview_spec) == "function" then
-      preview_cmd = shell.stringify_data(preview_spec, opts, "{}")
-    elseif type(preview_spec) == "table" then
-      preview_spec = vim.tbl_extend("keep", preview_spec, {
-        fn = preview_spec.fn or preview_spec[1],
-        -- by default we use current item only "{}"
-        -- using "{+}" will send multiple selected items
-        field_index = "{}",
-      })
-      if preview_spec.type == "cmd" then
-        preview_cmd = shell.stringify_cmd(preview_spec.fn, opts, preview_spec.field_index)
-      else
-        preview_cmd = shell.stringify_data(preview_spec.fn, opts, preview_spec.field_index)
-      end
-    end
-    if preview_cmd then
-      opts.fzf_opts["--preview"] = preview_cmd
     end
   end
   opts.fzf_opts["--bind"] = M.create_fzf_binds(opts)
@@ -636,13 +640,6 @@ M.build_fzf_cli = function(opts, fzf_win)
     if expect_binds and #expect_binds > 0 then
       table.insert(opts.fzf_opts["--bind"], table.concat(expect_binds, ","))
     end
-  end
-  if opts.fzf_opts["--preview-window"] == nil then
-    opts.fzf_opts["--preview-window"] = M.preview_window(opts, fzf_win)
-  end
-  if opts.fzf_opts["--preview-window"] and opts.preview_offset and #opts.preview_offset > 0 then
-    opts.fzf_opts["--preview-window"] =
-        opts.fzf_opts["--preview-window"] .. ":" .. opts.preview_offset
   end
   -- build the cli args
   local cli_args = {}
@@ -773,7 +770,16 @@ M.set_title_flags = function(opts, titles)
   return opts
 end
 
-M.set_header = function(opts, hdr_tbl)
+M.set_header = function(opts)
+  opts = opts or {}
+  opts._headers = opts._headers == nil and { "actions" } or opts._headers
+  if opts.header ~= nil
+      or opts.headers == false
+      or type(opts._headers) ~= "table"
+      or vim.tbl_isempty(opts._headers) then
+    return opts
+  end
+
   ---@param cwd string
   ---@return string
   local function normalize_cwd(cwd)
@@ -786,7 +792,6 @@ M.set_header = function(opts, hdr_tbl)
     return path.HOME_to_tilde(cwd)
   end
 
-  if not opts then opts = {} end
   if opts.cwd_prompt then
     opts.prompt = normalize_cwd(opts.cwd or uv.cwd())
     if tonumber(opts.cwd_prompt_shorten_len) and
@@ -794,9 +799,6 @@ M.set_header = function(opts, hdr_tbl)
       opts.prompt = path.shorten(opts.prompt, tonumber(opts.cwd_prompt_shorten_val) or 1)
     end
     opts.prompt = path.add_trailing(opts.prompt)
-  end
-  if opts.no_header or opts.headers == false then
-    return opts
   end
   local definitions = {
     -- key: opt name
@@ -892,13 +894,8 @@ M.set_header = function(opts, hdr_tbl)
       end,
     },
   }
-  -- by default we only display cwd headers
-  -- header string constructed in array order
-  if not opts.headers then
-    opts.headers = hdr_tbl or { "cwd" }
-  end
   -- override header text with the user's settings
-  for _, h in ipairs(opts.headers) do
+  for _, h in ipairs(opts._headers) do
     assert(definitions[h])
     local hdr_text = opts[definitions[h].hdr_txt_opt]
     if hdr_text then
@@ -907,7 +904,7 @@ M.set_header = function(opts, hdr_tbl)
   end
   -- build the header string
   local hdr_str
-  for _, h in ipairs(opts.headers) do
+  for _, h in ipairs(opts._headers) do
     assert(definitions[h])
     local def = definitions[h]
     local txt = def.val(opts)
@@ -993,10 +990,11 @@ M.convert_reload_actions = function(reload_cmd, opts)
       end
       local cmd = shell.stringify_data2(v.fn, opts, v.field_index or "{+}")
       opts.keymap.fzf[k] = {
-        string.format("%s%sexecute-silent(%s)+reload(%s)%s",
+        string.format("%s%sexecute-silent(%s)+%s(%s)%s",
           type(v.prefix) == "string" and v.prefix or "",
           unbind and (unbind .. "+") or "",
           cmd,
+          M.can_transform(opts) and "transform" or "reload", -- contents is not "cmd" but "reload:cmd"
           reload_cmd,
           type(v.postfix) == "string" and v.postfix or ""),
         desc = v.desc or config.get_action_helpstr(v.fn)
@@ -1062,9 +1060,8 @@ M.convert_exec_silent_actions = function(opts)
 end
 
 ---@param command string
----@param fzf_field_index string
 ---@param opts table
-M.setup_fzf_live_flags = function(command, fzf_field_index, opts)
+M.setup_fzf_live_flags = function(command, opts)
   -- query cannot be 'nil'
   opts.query = opts.query or ""
 
@@ -1080,29 +1077,6 @@ M.setup_fzf_live_flags = function(command, fzf_field_index, opts)
   if type(opts.query_delay) == "number" then
     reload_command = string.format("sleep %.2f; %s", opts.query_delay / 1000, reload_command)
   end
-  -- See the note in `make_entry.preprocess`, the NEQ condition on Windows
-  -- along with fzf's lacking escape sequence causes the empty query condition
-  -- to fail on spaces, comma and semicolon (and perhaps other use cases),
-  -- moving the test to our cmd wrapper solves it for anything but "native"
-  local no_query_condi = (opts.exec_empty_query or opts.argv_expr) and ""
-      or string.format(
-        utils._if_win(
-        -- due to the reload command already being shellescaped and fzf's {q}
-        -- also escaping the query with ^"<query>"^ any spaces in the query
-        -- will fail the command, by adding caret escaping before fzf's
-        -- we fool CMD.exe to not terminate the quote and thus an empty query
-        -- will generate the expression ^^"^" which translates to ^""
-        -- our specialized libuv.shellescape will also double the escape
-        -- sequence if a "!" is found in our string as explained in:
-        -- https://ss64.com/nt/syntax-esc.html
-        -- TODO: open an upstream bug rgd ! as without the double escape
-        -- if an ! is found in the command (i.e. -g "rg ... -g !.git")
-        -- sending a caret will require doubling (i.e. sending ^^ for ^)
-          utils.has(opts, "fzf", { 0, 51 }) and [[IF %s NEQ ^"^" ]] or [[IF ^%s NEQ ^^"^" ]],
-          "[ -z %s ] || "),
-        -- {q} for fzf is automatically shell escaped
-        fzf_field_index
-      )
 
   if opts._is_skim then
     opts.prompt = opts.__prompt or opts.prompt or opts.fzf_opts["--prompt"]
@@ -1126,7 +1100,7 @@ M.setup_fzf_live_flags = function(command, fzf_field_index, opts)
     opts.query = nil
     -- setup as interactive
     table.insert(opts._fzf_cli_args, string.format("--interactive --cmd %s",
-      libuv.shellescape(no_query_condi .. reload_command)))
+      libuv.shellescape(reload_command)))
   else
     opts.fzf_opts["--disabled"] = true
     opts.fzf_opts["--query"] = opts.query
@@ -1134,20 +1108,13 @@ M.setup_fzf_live_flags = function(command, fzf_field_index, opts)
     if opts.silent_fail ~= false then
       reload_command = reload_command .. " || " .. utils.shell_nop()
     end
-    if M.can_transform(opts) then
+    local query = opts.query and tostring(opts.query) or ""
+    local action = M.can_transform(opts) and "transform" or "reload"
+    table.insert(opts._fzf_cli_args, "--bind="
+      .. libuv.shellescape(string.format("change:+%s:%s", action, reload_command)))
+    if opts.exec_empty_query or #query > 0 or type(opts.contents) == "function" then
       table.insert(opts._fzf_cli_args, "--bind="
-        .. libuv.shellescape(string.format("change:+transform:%s", reload_command)))
-      if utils.has(opts, "fzf", { 0, 35 }) then
-        table.insert(opts._fzf_cli_args, "--bind="
-          .. libuv.shellescape(string.format("start:+transform:%s", reload_command)))
-      end
-    else
-      table.insert(opts._fzf_cli_args, "--bind="
-        .. libuv.shellescape(string.format("change:+reload:%s%s", no_query_condi, reload_command)))
-      if utils.has(opts, "fzf", { 0, 35 }) then
-        table.insert(opts._fzf_cli_args, "--bind="
-          .. libuv.shellescape(string.format("start:+reload:%s%s", no_query_condi, reload_command)))
-      end
+        .. libuv.shellescape(string.format("start:+%s:%s", action, reload_command)))
     end
   end
 end

@@ -7,6 +7,7 @@ local Object = require "fzf-lua.class"
 
 local Previewer = {}
 
+---@class fzf-lua.previewer.Fzf: fzf-lua.Object,{}
 Previewer.base = Object:extend()
 
 -- Previewer base object
@@ -21,6 +22,17 @@ function Previewer.base:new(o, opts)
   self.preview_offset = o.preview_offset
   self.opts = opts;
   return self
+end
+
+---@param opts table
+---@return table
+function Previewer.base:setup_opts(opts)
+  -- Set the preview command line
+  opts.preview = self:cmdline()
+  opts.preview_offset = self:_preview_offset()
+  opts.fzf_opts["--preview-window"] = self:preview_window()
+  opts.fzf_opts["--delimiter"] = self:fzf_delimiter()
+  return opts
 end
 
 function Previewer.base:preview_window(_)
@@ -64,6 +76,8 @@ function Previewer.base:fzf_delimiter()
 end
 
 -- Generic shell command previewer
+---@class fzf-lua.previewer.Cmd : fzf-lua.previewer.Fzf,{}
+---@field super fzf-lua.previewer.Fzf,{}
 Previewer.cmd = Previewer.base:extend()
 
 function Previewer.cmd:new(o, opts)
@@ -92,6 +106,8 @@ function Previewer.cmd:action(o)
 end
 
 -- Specialized bat previewer
+---@class fzf-lua.previewer.Bat : fzf-lua.previewer.Cmd,{}
+---@field super fzf-lua.previewer.Cmd,{}
 Previewer.bat = Previewer.cmd:extend()
 
 function Previewer.bat:new(o, opts)
@@ -114,6 +130,8 @@ function Previewer.bat:cmdline(o)
 end
 
 -- Specialized head previewer
+---@class fzf-lua.previewer.Head : fzf-lua.previewer.Cmd,{}
+---@field super fzf-lua.previewer.Cmd,{}
 Previewer.head = Previewer.cmd:extend()
 
 function Previewer.head:new(o, opts)
@@ -133,6 +151,8 @@ function Previewer.head:cmdline(o)
 end
 
 -- new async_action from nvim-fzf
+---@class fzf-lua.previewer.CmdAsync : fzf-lua.previewer.Cmd,{}
+---@field super fzf-lua.previewer.Cmd,{}
 Previewer.cmd_async = Previewer.base:extend()
 
 function Previewer.cmd_async:new(o, opts)
@@ -176,7 +196,6 @@ end
 
 function Previewer.cmd_async:parse_entry_and_verify(entrystr)
   local entry = path.entry_to_file(entrystr, self.opts)
-  entry.line = self.opts.line_query and tonumber(self._last_query:match(":(%d+)$")) or entry.line
   -- make relative for bat's header display
   local filepath = path.relative_to(entry.bufname or entry.path or "", uv.cwd())
   if self.opts._ctag then
@@ -193,8 +212,8 @@ function Previewer.cmd_async:parse_entry_and_verify(entrystr)
     end
   end
   local errcmd = nil
-  if filepath:match("^%[DEBUG]") then
-    errcmd = "echo " .. libuv.shellescape(tostring(filepath:gsub("^%[DEBUG]", "")))
+  if entry.debug then
+    errcmd = "echo " .. libuv.shellescape(entry.debug)
   else
     -- verify the file exists on disk and is accessible
     if #filepath == 0 or not uv.fs_stat(filepath) then
@@ -218,6 +237,8 @@ function Previewer.cmd_async:cmdline(o)
   return act
 end
 
+---@class fzf-lua.previewer.BatAsync : fzf-lua.previewer.CmdAsync,{}
+---@field super fzf-lua.previewer.CmdAsync,{}
 Previewer.bat_async = Previewer.cmd_async:extend()
 
 ---@param lnum string?
@@ -283,6 +304,8 @@ function Previewer.bat_async:cmdline(o)
   return act
 end
 
+---@class fzf-lua.previewer.GitDiff : fzf-lua.previewer.Fzf,{}
+---@field super fzf-lua.previewer.Fzf,{}
 Previewer.git_diff = Previewer.base:extend()
 
 function Previewer.git_diff:new(o, opts)
@@ -384,6 +407,8 @@ function Previewer.git_diff:cmdline(o)
   return act
 end
 
+---@class fzf-lua.previewer.fzf.ManPages : fzf-lua.previewer.Fzf,{}
+---@field super fzf-lua.previewer.Fzf,{}
 Previewer.man_pages = Previewer.base:extend()
 
 function Previewer.man_pages:new(o, opts)
@@ -403,6 +428,8 @@ function Previewer.man_pages:cmdline(o)
   return act
 end
 
+---@class fzf-lua.previewer.fzf.HelpTags : fzf-lua.previewer.Fzf,{}
+---@field super fzf-lua.previewer.fzf.HelpTags,{}
 Previewer.help_tags = Previewer.base:extend()
 
 function Previewer.help_tags:fzf_delimiter()

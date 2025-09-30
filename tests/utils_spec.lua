@@ -1,5 +1,6 @@
 local helpers = require("fzf-lua.test.helpers")
 local assert = helpers.assert
+local eq = assert.are.same
 
 local fzf = require("fzf-lua")
 local utils = fzf.utils
@@ -81,12 +82,38 @@ describe("Testing utils module", function()
     assert.are.same(utils.has({ __FZF_VERSION = { 2, 5, 5 } }, "fzf", "2.5.6"), false)
   end)
 
-  it("setmetatable__gc", function()
+  it("setmetatable with gc", function()
     local gc_called = nil
-    local _obj = utils.setmetatable__gc({}, { __gc = function() gc_called = true end })
+    local _obj = utils.setmetatable({}, { __gc = function() gc_called = true end })
     assert.are.same(gc_called, nil)
     _obj = nil
     collectgarbage("collect")
     assert.are.same(gc_called, true)
+  end)
+
+  it("wo", function()
+    utils.wo.nonexist = "this is nop"
+    assert.are.same(nil, utils.wo.nonexist)
+    vim.wo[0][0].nu = true -- setlocal
+    vim.wo[0].rnu = true   -- setglobal
+    assert.are.same(vim.wo[0][0].nu, vim.wo.nu)
+    assert.are.same(vim.wo[0][0].rnu, vim.wo.rnu)
+    vim.cmd.new()
+    assert.are.same(vim.wo[0][0].nu, vim.wo.nu)
+    assert.are.same(vim.wo[0][0].rnu, vim.wo.rnu)
+  end)
+
+  it("strsplit", function()
+    eq(utils.strsplit("abc", "%s+"), { "abc" })
+    eq(utils.strsplit("", "%s+"), { "" })
+    eq(utils.strsplit("foo bar baz", "%s+"), { "foo", "bar", "baz" })
+    eq(utils.strsplit("foo   bar    baz", "%s+"), { "foo", "bar", "baz" })
+    eq(utils.strsplit("foo\tbar\nbaz", "%s+"), { "foo", "bar", "baz" })
+    eq(utils.strsplit("  foo bar  ", "%s+"), { "", "foo", "bar", "" })
+    eq(utils.strsplit("foo,,bar,,baz", ",+"), { "foo", "bar", "baz" })
+    eq(utils.strsplit("a,b,c", ","), { "a", "b", "c" })
+    eq(utils.strsplit(",,,", ",+"), { "", "" })
+    eq(utils.strsplit(",foo,bar,", ","), { "", "foo", "bar", "" })
+    eq(utils.strsplit("foobar", ","), { "foobar" })
   end)
 end)

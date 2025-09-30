@@ -39,13 +39,13 @@ end
 ---@return table selected
 ---@return integer exit_code
 function M.raw_fzf(contents, fzf_cli_args, opts)
-  assert(not contents or type(contents) == "string", "contents must be of type function")
+  assert(not contents or type(contents) == "string",
+    "contents must be of type string: " .. tostring(contents))
   if not coroutine.running() then
     error("[Fzf-lua] function must be called inside a coroutine.")
   end
 
   if not opts then opts = {} end
-  local cwd = opts.fzf_cwd or opts.cwd
   local cmd = { opts.fzf_bin or "fzf" }
   local outputtmpname = tempname()
 
@@ -66,11 +66,6 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
   end)()
 
   utils.tbl_join(cmd, fzf_cli_args or {})
-  if type(opts.fzf_cli_args) == "table" then
-    utils.tbl_join(cmd, opts.fzf_cli_args)
-  elseif type(opts.fzf_cli_args) == "string" then
-    utils.tbl_join(cmd, { opts.fzf_cli_args })
-  end
 
   local function get_EOL(flag)
     for _, f in ipairs(cmd) do
@@ -121,9 +116,9 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
     -- })
   end
 
-  if opts.debug then
-    print("[Fzf-lua]: FZF_DEFAULT_COMMAND:", FZF_DEFAULT_COMMAND)
-    print("[Fzf-lua]: fzf cmd:", table.concat(cmd, " "))
+  if opts.debug and type(opts.debug) ~= "number" then
+    utils.info("FZF_DEFAULT_COMMAND: %s", tostring(FZF_DEFAULT_COMMAND))
+    utils.info("fzf cmd: %s", table.concat(cmd, " "))
   end
 
   local co = coroutine.running()
@@ -148,10 +143,12 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
   local nvim_opt_shellslash = utils.__WIN_HAS_SHELLSLASH and vim.o.shellslash
   if nvim_opt_shellslash then vim.o.shellslash = false end
   jobstart(shell_cmd, {
-    cwd = cwd,
+    cwd = opts.cwd,
     pty = true,
     env = {
       ["SHELL"] = shell_cmd[1],
+      -- Nullify "NVIM_LISTEN_ADDRESS", will cause issues if already in use (#2253)
+      ["NVIM_LISTEN_ADDRESS"] = "",
       ["FZF_DEFAULT_COMMAND"] = FZF_DEFAULT_COMMAND,
       ["SKIM_DEFAULT_COMMAND"] = FZF_DEFAULT_COMMAND,
       ["FZF_LUA_SERVER"] = vim.g.fzf_lua_server,
@@ -202,6 +199,9 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
   -- fzf-tmux spawns outside neovim, don't set filetype/insert mode
   if not opts.is_fzf_tmux then
     vim.bo.filetype = "fzf"
+
+    local fzfwin = utils.fzf_winobj()
+    if fzfwin then fzfwin:update_statusline() end
 
     -- See note in "ModeChanged" above
     if vim.api.nvim_get_mode().mode == "t" then

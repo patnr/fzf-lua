@@ -25,18 +25,7 @@ T["win"] = new_set()
 T["win"]["hide"] = new_set()
 
 T["win"]["hide"]["ensure gc called after win hidden (#1782)"] = function()
-  exec_lua([[
-    _G._gc_called = nil
-    FzfLua.utils.setmetatable__gc = function(t, mt)
-      local prox = newproxy(true)
-      getmetatable(prox).__gc = function()
-        _G._gc_called = true
-        mt.__gc(t)
-      end
-      t[prox] = true
-      return setmetatable(t, mt)
-    end
-  ]])
+  exec_lua([[_G._fzf_lua_gc_called = nil]])
   -- Reduce cache size to 20 so functions get evicted quicker
   -- otherwise opts refs that are stored in the funcs are never
   -- cleared preventing the win object's __gc from being called
@@ -59,7 +48,7 @@ T["win"]["hide"]["ensure gc called after win hidden (#1782)"] = function()
       return child.lua_get([[_G._fzf_load_called]]) == vim.NIL
     end)
     exec_lua([[collectgarbage('collect')]])
-    return child.lua_get([[_G._gc_called]]) == true
+    return child.lua_get([[_G._fzf_lua_gc_called]]) == true
   end)
   -- Restore original cache size
   exec_lua([[FzfLua.shell.cache_set_size(50)]])
@@ -143,10 +132,14 @@ end
 
 T["win"]["keymap"] = new_set({ n_retry = not helpers.IS_LINUX() and 5 or nil })
 
-T["win"]["keymap"]["no error"] = function()
-  local builtin = child.lua_get [[FzfLua.defaults.keymap.builtin]]
-  for _, event in ipairs({ "start", "load", "result" }) do
-    for key, actions in pairs(builtin) do
+T["win"]["keymap"]["no error"] = new_set({
+  parametrize = vim.iter(require("fzf-lua.defaults").defaults.keymap.builtin)
+      :map(function(key, action) return { key, action } end)
+      :totable()
+}, {
+  function(key, _action)
+    local builtin = child.lua_get [[FzfLua.defaults.keymap.builtin]]
+    for _, event in ipairs({ "start", "load", "result" }) do
       exec_lua([[
         FzfLua.files {
           query = "README.md",
@@ -158,9 +151,192 @@ T["win"]["keymap"]["no error"] = function()
         return child.lua_get([[_G._fzf_load_called]]) == true
       end)
       child.type_keys(key)
-      if helpers.IS_WIN() then child.type_keys("<c-c>") end
+      child.type_keys("<c-c>")
+      child.wait_until(function()
+        return child.lua_get([[_G._fzf_load_called]]) == vim.NIL
+      end)
     end
-  end
+  end })
+
+T["win"]["previewer"] = new_set({ n_retry = not helpers.IS_LINUX() and 5 or nil })
+
+T["win"]["previewer"]["split flex layout resize"] = function()
+  -- Ignore terminal command line with process number
+  local screen_opts = { ignore_text = { 24, 28 }, normalize_paths = helpers.IS_WIN() }
+  helpers.FzfLua.fzf_exec(child, { "foo", "bar", "baz" }, {
+    __no_abort = true,
+    __expect_lines = true,
+    __screen_opts = screen_opts,
+    winopts = {
+      split = "enew",
+      preview = {
+        -- default test screen size is 28,64
+        flip_columns = 64,
+      }
+    },
+    previewer = function() return require("fzf-lua.test.previewer").builtin end,
+    keymap = {
+      fzf = {
+        resize = function()
+          _G._fzf_resize_called = true
+        end
+      }
+    },
+    __after_open = function()
+      child.wait_until(function()
+        return child.lua_get([[FzfLua.utils.fzf_winobj()._previewer.last_entry]]) == "foo"
+      end)
+    end,
+  })
+  -- increase size by 1, should flip to vertical preview
+  child.set_size(28, 65)
+  child.wait_until(function()
+    return child.lua_get([[_G._fzf_resize_called]]) == true
+  end)
+  if helpers.IS_WIN() then vim.uv.sleep(250) end
+  child.expect_screen_lines(screen_opts)
+  -- abort and wait for winopts.on_close
+  child.type_keys("<c-c>")
+  child.wait_until(function()
+    return child.lua_get([[_G._fzf_lua_on_create]]) == vim.NIL
+  end)
 end
+
+local toggle_preview = function(opts, screen_opts)
+  opts = opts or {}
+  child.wait_until(function() return child.api.nvim_get_mode().mode == "t" end)
+  exec_lua([[require("fzf-lua.win").toggle_preview()]])
+  if helpers.IS_WIN() then
+    vim.uv.sleep(250)
+  elseif opts.preview then
+    vim.uv.sleep(100)
+  else
+    vim.uv.sleep(100)
+    -- child.wait_until(function()
+    --   return child.lua_get([[FzfLua.utils.fzf_winobj()._previewer.last_entry]]) == "foo"
+    -- end)
+  end
+  if screen_opts then child.expect_screen_lines(screen_opts) end
+  -- abort and wait for winopts.on_close
+  child.type_keys("<c-c>")
+  child.wait_until(function()
+    return child.lua_get([[_G._fzf_lua_on_create]]) == vim.NIL
+  end)
+end
+
+T["win"]["previewer"]["split flex hidden"] = function()
+  -- Ignore terminal command line with process number
+  local screen_opts = { ignore_text = { 24, 28 }, normalize_paths = helpers.IS_WIN() }
+  local opts = {
+    __no_abort = true,
+    __expect_lines = true,
+    __screen_opts = screen_opts,
+    winopts = {
+      split = "enew",
+      preview = {
+        -- default test screen size is 28,64
+        flip_columns = 64,
+        -- start hidden
+        hidden = true
+      }
+    },
+    previewer = function() return require("fzf-lua.test.previewer").builtin end,
+    __after_open = function()
+      if helpers.IS_WIN() then vim.uv.sleep(250) end
+    end,
+  }
+  helpers.FzfLua.fzf_exec(child, { "foo", "bar", "baz" }, opts)
+  -- increase size by 1, should flip to vertical preview
+  child.set_size(28, 65)
+  toggle_preview(opts, screen_opts)
+end
+
+-- E: toggle_behavior=extend, B: builtin previewer, F: "echo {}" preview
+T["win"]["toggle"] = new_set({ parametrize = { { "EB" }, { "EF" }, { "B" }, { "F" } } })
+T["win"]["toggle"][""] = new_set(
+  {
+    parametrize = {
+      { {} },
+      { { winopts = { split = "enew", } } },
+      { { winopts = { split = "botright new", preview = { layout = "horizontal" } } } },
+      { { profile = "border-fused" } },
+      { { profile = "borderless-full", winopts = { preview = { layout = "horizontal" } }, } },
+      { { winopts = { border = false } } },
+      { { winopts = { preview = { vertical = "down:4" } } } },
+      { { winopts = { preview = { border = false } } } },
+    }
+  }, {
+    -- Ignore terminal command line with process number
+    function(a, o)
+      local screen_opts = { ignore_text = { 24, 28 }, normalize_paths = helpers.IS_WIN() }
+      local opts = {
+        __no_abort = true,
+        __expect_lines = true,
+        __screen_opts = screen_opts,
+        winopts = { preview = { hidden = true, delay = 0 } },
+        __after_open = function()
+          if helpers.IS_WIN() then vim.uv.sleep(250) end
+        end,
+      }
+      opts = vim.tbl_deep_extend("force", opts, o)
+      -- don't modify o directly, otherwise it will change screenshots name
+      if a:match("E") then
+        opts = vim.tbl_deep_extend("force", opts, { winopts = { toggle_behavior = "extend" } })
+      end
+      if a:match("B") then
+        opts.previewer = function() return require("fzf-lua.test.previewer").builtin end
+      elseif a:match("F") then
+        opts.previewer = function() return require("fzf-lua.test.previewer").fzf end
+      else
+        error("unreachable")
+      end
+      helpers.FzfLua.fzf_exec(child, { "foo", "bar", "baz" }, opts)
+      toggle_preview(opts, screen_opts)
+    end
+  })
+
+T["win"]["reuse"] = new_set({
+  parametrize = {
+    { {} },
+    { { winopts = { split = "enew", } } },
+    { { winopts = { split = "botright new", preview = { layout = "horizontal" } } } },
+  }
+}, {
+  function(o)
+    -- Ignore terminal command line with process number
+    local screen_opts = { ignore_text = { 24, 28 }, normalize_paths = helpers.IS_WIN() }
+    local opts = {
+      __no_abort = true,
+      __expect_lines = false,
+      __screen_opts = screen_opts,
+      winopts = {
+        toggle_behavior = "extend",
+        preview = { hidden = false, delay = 0 },
+      },
+      previewer = function() return require("fzf-lua.test.previewer").builtin end,
+      __after_open = function()
+        if helpers.IS_WIN() then vim.uv.sleep(250) end
+      end,
+    }
+    opts = vim.tbl_deep_extend("force", opts, o)
+    helpers.FzfLua.fzf_exec(child, { "foo", "bar", "baz" }, opts)
+    -- change to fzf preview
+    opts.previewer = nil
+    opts.preview = "echo resue windows, change from builtin to fzf preview"
+    opts.__expect_lines = true
+    opts.__no_abort = nil
+    exec_lua([[_G._fzf_lua_on_create = nil]])
+    exec_lua([[_G._fzf_load_called = nil]])
+    helpers.FzfLua.fzf_exec(child, { "foo", "bar", "baz" }, opts)
+
+    -- toggle_preview on hide profile
+    reload({ "hide" })
+    exec_lua([[
+      require('fzf-lua').fzf_exec({ 'a', 'b' },{ preview = "echo builtin" })
+      require('fzf-lua').fzf_exec({ 'b', 'c' }, { previewer = require('fzf-lua.test.previewer').builtin })
+    ]])
+    toggle_preview()
+  end
+})
 
 return T

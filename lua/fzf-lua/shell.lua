@@ -163,12 +163,35 @@ function M.pipe_wrap_fn(fn, fzf_field_index, debug)
   return action_cmd, id
 end
 
----@param cmd string
----@param opts table
+---@param v function
+---@param varname string
 ---@return string
-M.stringify_mt = function(cmd, opts)
-  opts.cmd = cmd or opts.cmd
-  ---@param o table<string, unknown>
+M.check_upvalue = function(v, varname)
+  -- Attempt to convert function to its bytecode representation
+  -- TODO: can be replaced with vim.base64 after neovim >= 0.10
+  local str = string.format(
+    [[return loadstring(require("fzf-lua.lib.base64").decode("%s"))]],
+    require("fzf-lua.lib.base64").encode(string.dump(v, true)))
+  -- Test the function once with nil value (imprefect?)
+  -- to see if there's an issue with upvalue refs
+  local f = loadstring(str)()
+  local ok, err = pcall(f)
+  assert(
+    ok or (not err:match("attempt to index upvalue") and not err:match("attempt to call upvalue")),
+    string.format("multiprocess '%s' cannot have upvalue referecnces", varname))
+  return str
+end
+
+-- stringify_mt: the wrapped multiprocess command is independent, most of it's
+-- options are serialized as strings and the rest are read from the main instance
+-- config over RPC, if the command doesn't require any processing it will be piped
+-- directly to fzf using $FZF_DEFAULT_COMMAND
+---@param contents fzf-lua.content|fzf-lua.shell.data2
+---@param opts fzf-lua.config.Base|{}
+---@return string?
+M.stringify_mt = function(contents, opts)
+  if opts.multiprocess == false then return end
+  ---@param o fzf-lua.config.Base|{}
   ---@return table
   local filter_opts = function(o)
     local names = {
@@ -176,9 +199,9 @@ M.stringify_mt = function(cmd, opts)
       "profiler",
       "process1",
       "silent",
-      "argv_expr",
       "cmd",
       "cwd",
+      "cwd_only",
       "stdout",
       "stderr",
       "stderr_to_stdout",
@@ -197,6 +220,8 @@ M.stringify_mt = function(cmd, opts)
       "fn_transform",
       "fn_preprocess",
       "fn_postprocess",
+      "is_live",
+      "contents", -- different when opts.cmd is also used by e.g. get_grep_cmd
       utils.__IS_WINDOWS and "__FZF_VERSION" or nil,
     }
     -- caller requested rg with glob support
@@ -216,8 +241,8 @@ M.stringify_mt = function(cmd, opts)
       -- [NOTE] No longer needed, we use RPC for icons
       -- ["_devicons_path"] = devicons.plugin_path(),
       -- ["_devicons_setup"] = config._devicons_setup,
-      ["_EOL"] = opts.multiline and "\0" or "\n",
-      ["_debug"] = opts.debug,
+      ["_EOL"] = utils.map_get(o, "fzf_opts.--read0") and "\0" or "\n",
+      ["_debug"] = o.debug,
     }) do
       t.g[k] = v
     end
@@ -226,63 +251,27 @@ M.stringify_mt = function(cmd, opts)
 
   -- `multiprocess=1` is "optional" if no opt which requires processing
   -- is present we return the command as is to be piped to fzf "natively"
-  if (opts.multiprocess == nil or opts.multiprocess == 1)
+  if opts.multiprocess ~= true and type(contents) == "string"
       and not opts.fn_transform
       and not opts.fn_preprocess
       and not opts.fn_postprocess
   then
-    -- command does not require any processing, we also reset `argv_expr`
-    -- to keep `setup_fzf_interactive_flags::no_query_condi` in the command
-    opts.argv_expr = nil
-    return opts.cmd
-  else -- if opts.multiprocess then
-    for _, k in ipairs({ "fn_transform", "fn_preprocess", "fn_postprocess" }) do
-      local v = opts[k]
-      if type(v) == "function" and utils.__HAS_NVIM_010 then
-        -- Attempt to convert function to its bytecode representation
-        -- NOTE: limited to neovim >= 0.10 due to vim.base64
-        v = string.format(
-          [[return loadstring(vim.base64.decode("%s"))]],
-          vim.base64.encode(string.dump(v, true)))
-        -- Test the function once with nil value (imprefect?)
-        -- to see if there's an issue with upvalue refs
-        local f = loadstring(v)()
-        local ok, err = pcall(f)
-        assert(ok or not err:match("attempt to index upvalue"),
-          string.format("multiprocess '%s' cannot have upvalue referecnces", k))
-        opts[k] = v
-      end
-      assert(not v or type(v) == "string", "multiprocess requires lua string callbacks")
-    end
-    if opts.argv_expr then
-      -- Since the `rg` command will be wrapped inside the shell escaped
-      -- '--headless .. --cmd', we won't be able to search single quotes
-      -- as it will break the escape sequence. So we use a nifty trick:
-      --   * replace the placeholder with {argv1}
-      --   * re-add the placeholder at the end of the command
-      --   * preprocess then replace it with vim.fn.argv(1)
-      -- NOTE: since we cannot guarantee the positional index
-      -- of arguments (#291), we use the last argument instead
-      opts.cmd = opts.cmd:gsub(FzfLua.core.fzf_query_placeholder, "{argvz}")
-      -- NOTE: we add preprocess in config.normalize_opts but `opts.argv_expr`
-      -- isn't yet set at that point
-      if opts.fn_preprocess == nil then
-        opts.fn_preprocess = [[return require("fzf-lua.make_entry").preprocess]]
-      end
-    end
-    local spawn_cmd = M.wrap_spawn_stdio(filter_opts(opts))
-    if opts.argv_expr then
-      -- prefix the query with `--` so we can support `--fixed-strings` (#781)
-      spawn_cmd = string.format("%s -- %s", spawn_cmd, FzfLua.core.fzf_query_placeholder)
-    end
-    return spawn_cmd
+    -- command does not require any processing
+    return contents
+    -- don't use mt for non-string contents unless multiprocess is explictly set to true
+  elseif opts.multiprocess ~= true and type(contents) ~= "string" then
+    return nil
+  else
+    opts.contents = contents
+    return M.wrap_spawn_stdio(filter_opts(opts))
   end
 end
 
----Fzf field index expression, e.g. "{+}" (selected), "{q}" (query)
----@param contents table|function|string
+-- Contents sent to fzf can only be nil or a shell command (string)
+-- the API accepts both tables and functions which we "stringify"
+---@param contents table|string|fzf-lua.content|fzf-lua.shell.cmd|fzf-lua.shell.data|fzf-lua.shell.data2
 ---@param opts {}
----@param fzf_field_index string?
+---@param fzf_field_index string? Fzf field index expression, e.g. "{+}" (selected), "{q}" (query)
 ---@return string, integer?
 M.stringify = function(contents, opts, fzf_field_index)
   -- TODO: should we let this assert?
@@ -295,8 +284,7 @@ M.stringify = function(contents, opts, fzf_field_index)
 
   -- Convert string callbacks to callback functions
   for _, k in ipairs({ "fn_transform", "fn_preprocess", "fn_postprocess" }) do
-    local v = opts[k]
-    opts[k] = libuv.load_fn(opts[k]) or v
+    opts[k] = libuv.load_fn(opts[k]) or opts[k]
   end
 
   local cmd, id = M.pipe_wrap_fn(function(pipe, ...)
@@ -304,10 +292,11 @@ M.stringify = function(contents, opts, fzf_field_index)
     -- Contents could be dependent or args, e.g. live_grep which
     -- generates a different command based on the typed query
     -- redefine local contents to prevent override on function call
+    ---@type fzf-lua.content, table?
     ---@diagnostic disable-next-line: redefined-local
     local contents, env = (function()
-      local ret = (opts.fn_reload or opts.__stringify_cmd)
-          and contents(unpack(args))
+      local ret = opts.is_live and type(contents) == "function" and contents(unpack(args), opts)
+          or opts.__stringify_cmd and contents(unpack(args))
           or contents
       if opts.__stringify_cmd and type(ret) == "table" then
         return ret.cmd, (ret.env or opts.env)
@@ -317,7 +306,7 @@ M.stringify = function(contents, opts, fzf_field_index)
     end)()
     local write_cb_count = 0
     local pipe_want_close = false
-    local EOL = opts.multiline and "\0" or "\n"
+    local EOL = utils.map_get(opts, "fzf_opts.--read0") and "\0" or "\n"
     local fn_transform = opts.fn_transform
     local fn_preprocess = opts.fn_preprocess
     local fn_postprocess = opts.fn_postprocess
@@ -352,13 +341,15 @@ M.stringify = function(contents, opts, fzf_field_index)
         if type(data) == "table" then
           -- cb_write_lines was sent instead of cb_lines
           if fn_transform then
-            -- Iterate back to front so we can remove items safely
-            for i = #data, 1, -1 do
+            -- safely remove items while iterating
+            local i = 1
+            while i <= #data do
               local v = fn_transform(data[i], opts)
               if not v then
                 table.remove(data, i)
               else
                 data[i] = v
+                i = i + 1
               end
             end
           end
@@ -425,14 +416,14 @@ M.stringify = function(contents, opts, fzf_field_index)
         return on_write(data, cb)
       end
 
-      local ok, err = pcall(function()
+      local ok, err = xpcall(function()
         if type(contents) == "table" then
           vim.tbl_map(function(x) on_write_nl(x) end, contents)
           on_finish()
         elseif type(contents) == "function" then
           contents(on_write_nl, on_write, unpack(args))
         end
-      end)
+      end, debug.traceback)
       if not ok and err then
         on_finish()
         error(err)
@@ -443,7 +434,12 @@ M.stringify = function(contents, opts, fzf_field_index)
   return cmd, id
 end
 
----@param fn fun(items: string[], fzf_lines: integer, fzf_columns: integer): string|{ cmd: string|string[], env: table? }?
+---@alias fzf-lua.shell.cmdSpec string|{ cmd: string|string[], env: table? }?
+---@alias fzf-lua.shell.cmd fun(items: string[], fzf_lines: integer, fzf_columns: integer): fzf-lua.shell.cmdSpec
+---@alias fzf-lua.shell.data fun(items: string[], fzf_lines: integer, fzf_columns: integer): fzf-lua.content?
+---@alias fzf-lua.shell.data2 fun(items: string[], opts: table): fzf-lua.content?
+
+---@param fn fzf-lua.shell.cmd
 ---@param opts table
 ---@param fzf_field_index string?
 ---@return string, integer?
@@ -456,7 +452,7 @@ M.stringify_cmd = function(fn, opts, fzf_field_index)
   }, fzf_field_index)
 end
 
----@param fn fun(items: string[], fzf_lines: integer, fzf_columns: integer): string|string[]?
+---@param fn fzf-lua.shell.data
 ---@param opts table
 ---@param fzf_field_index string?
 ---@return string, integer?
@@ -481,12 +477,11 @@ end
 -- the process never terminates and `--print-query` isn't being printed
 -- When no entry selected (with {q} {+}), {+} will be forced expand to ''
 -- Use {n} to know if we really select an empty string, or there's just no selected
----@param fn fun(items: string[], opts: table): string|string[]?
+---@param fn fzf-lua.shell.data2
 ---@param opts table
 ---@param field_index string
 ---@return string
 M.stringify_data2 = function(fn, opts, field_index)
-  local field_index0 = field_index
   local did_override = false
   if not field_index:match("{q} {n}$") then
     field_index = field_index .. " {q} {n}"
@@ -503,7 +498,7 @@ M.stringify_data2 = function(fn, opts, field_index)
     -- fix side effect of "{q} {+}": {+} is forced expanded to ""
     -- only when field_index is empty (otherwise it can be complex/unpredictable)
     -- {n} used to determine if "zero-selected && zero-match", then patch: "" -> nil
-    if #field_index0 == 0 then
+    if field_index == "{+} {q} {n}" then
       -- When no item is matching (empty list or non-matching query)
       -- both {n} and {+} are expanded to "".
       -- NOTE1: older versions of fzf don't expand {n} to "" (without match)
@@ -513,7 +508,7 @@ M.stringify_data2 = function(fn, opts, field_index)
       local zero_selected = #items == 0 or (#items == 1 and #items[1] == 0)
       items = (zero_matched and zero_selected) and {} or items
     end
-    fn(items, opts)
+    return fn(items, opts)
   end, opts, field_index)
 end
 
@@ -522,6 +517,13 @@ end
 M.wrap_spawn_stdio = function(opts)
   local is_win = utils.__IS_WINDOWS
   local nvim_bin = os.getenv("FZF_LUA_NVIM_BIN") or vim.v.progpath
+  -- TODO: should we check "cmd"?
+  for _, k in ipairs({ "contents", "fn_transform", "fn_preprocess", "fn_postprocess" }) do
+    if type(opts[k]) == "function" then
+      -- opts[k] = M.check_upvalue(opts[k], "opts." .. k)
+      M.check_upvalue(opts[k], "opts." .. k)
+    end
+  end
   local cmd_str = ("%s -u NONE -l %s %s"):format(
     libuv.shellescape(is_win and vim.fs.normalize(nvim_bin) or nvim_bin),
     libuv.shellescape(vim.fn.fnamemodify(is_win and vim.fs.normalize(__FILE__) or __FILE__, ":h") ..
