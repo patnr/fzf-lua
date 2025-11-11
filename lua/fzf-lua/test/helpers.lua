@@ -36,7 +36,7 @@ local os_detect = {
   },
   MAC = { name = "MacOS", fn = function() return vim.fn.has("mac") == 1 end },
   LINUX = { name = "Linux", fn = function() return vim.fn.has("linux") == 1 end },
-  STABLE = { name = "Neovim stable", fn = function() return M.NVIM_VERSION() == "0.11.3" end },
+  STABLE = { name = "Neovim stable", fn = function() return M.NVIM_VERSION() == "0.11.4" end },
   NIGHTLY = { name = "Neovim nightly", fn = function() return vim.fn.has("nvim-0.12") == 1 end },
 }
 
@@ -149,7 +149,8 @@ M.new_child_neovim = function()
   child.setup = function(config)
     -- using "FZF_DEFAULT_OPTS" hangs the command on the
     -- child process and the loading indicator never stops
-    local defaults = M.IS_WIN() and { pipe_cmd = true } or nil
+    local defaults = { fzf_opts = { ["--gutter"] = " " } }
+    if M.IS_WIN() then defaults.pipe_cmd = true end
     child.lua(function(...)
       require("fzf-lua").setup(vim.tbl_deep_extend("keep", ..., {
         { "default-title" },
@@ -326,6 +327,7 @@ M.new_child_neovim = function()
   end
 
   local wait_timeout = (M.IS_LINUX() and 2000 or 5000)
+  wait_timeout = os.getenv("CI") and wait_timeout * 2 or wait_timeout
   --- waits until condition fn evals to true, checking every interval ms
   --- times out at timeout ms
   ---@param condition fun(): boolean

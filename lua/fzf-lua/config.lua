@@ -711,6 +711,21 @@ function M.normalize_opts(opts, globals, __resume_key)
     opts.multiline = nil
   end
 
+  -- Support filenames with CRLF (#2367), idea borrowed from fzf v0.39 changelog:
+  -- carriage return and a line feed characters will be rendered as dim ␍ and ␊ respectively
+  if opts.render_crlf then
+    opts.fzf_opts["--read0"] = true
+    if opts.fd_opts then
+      -- adding "-0" to fd prepends entries with "./", since we cannot guarantee fd v8.3
+      -- we remove the prefix in `make_entry.file` (instead of adding "--strip-cwd-prefix")
+      opts.strip_cwd_prefix = true
+      opts.fd_opts = "-0 " .. opts.fd_opts
+    end
+    if opts.rg_opts then opts.rg_opts = "-0 " .. opts.rg_opts end
+    if opts.grep_opts then opts.grep_opts = "-Z " .. opts.grep_opts end
+    if opts.find_opts then opts.find_opts = "-print0 " .. opts.find_opts end
+  end
+
   do
     -- Remove incompatible flags / values
     --   (1) `true` flags are removed entirely (regardless of value)
@@ -738,6 +753,8 @@ function M.normalize_opts(opts, globals, __resume_key)
         }
       else
         return "fzf", opts.__FZF_VERSION, {
+          ["0.66"] = { fzf_opts = { ["--raw"] = true, ["--gutter"] = true, ["--gutter-raw"] = true } },
+          ["0.63"] = { fzf_opts = { ["--footer"] = true } },
           ["0.59"] = { fzf_opts = { ["--scheme"] = "path" } },
           ["0.56"] = { fzf_opts = { ["--gap"] = true } },
           ["0.54"] = {
@@ -908,6 +925,7 @@ function M.normalize_opts(opts, globals, __resume_key)
         or opts.file_icons
         or opts.file_ignore_patterns
         or opts.strip_cwd_prefix
+        or opts.render_crlf
         or opts.path_shorten
         or opts.formatter
         or opts.multiline
@@ -1056,6 +1074,7 @@ M._action_to_helpstr = {
   [actions.help]                 = "help-open",
   [actions.help_vert]            = "help-vertical",
   [actions.help_tab]             = "help-tab",
+  [actions.help_curwin]          = "help-open-curwin",
   [actions.man]                  = "man-open",
   [actions.man_vert]             = "man-vertical",
   [actions.man_tab]              = "man-tab",
@@ -1063,6 +1082,8 @@ M._action_to_helpstr = {
   [actions.git_branch_del]       = "git-branch-del",
   [actions.git_switch]           = "git-switch",
   [actions.git_worktree_cd]      = "change-directory",
+  [actions.git_worktree_add]     = "git-worktree-add",
+  [actions.git_worktree_del]     = "git-worktree-del",
   [actions.git_checkout]         = "git-checkout",
   [actions.git_reset]            = "git-reset",
   [actions.git_stage]            = "git-stage",

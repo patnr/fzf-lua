@@ -275,6 +275,7 @@ T["win"]["toggle"][""] = new_set(
         __screen_opts = screen_opts,
         winopts = { preview = { hidden = true, delay = 0 } },
         __after_open = function()
+          child.wait_until(function() return child.lua_get([[_G._fzf_load_called]]) == true end)
           if helpers.IS_WIN() then vim.uv.sleep(250) end
         end,
       }
@@ -315,6 +316,7 @@ T["win"]["reuse"] = new_set({
       },
       previewer = function() return require("fzf-lua.test.previewer").builtin end,
       __after_open = function()
+        child.wait_until(function() return child.lua_get([[_G._fzf_load_called]]) == true end)
         if helpers.IS_WIN() then vim.uv.sleep(250) end
       end,
     }

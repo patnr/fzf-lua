@@ -229,7 +229,8 @@ M.vimcmd_entry = function(vimcmd, selected, opts, bufedit)
             vimcmd, will_replace_curbuf = "split", false
           elseif not vim.o.hidden
               and not vim.o.confirm
-              and utils.buffer_is_dirty(vim.api.nvim_get_current_buf(), true) then
+              and not vim.o.autowriteall
+              and utils.buffer_is_dirty(vim.api.nvim_get_current_buf(), true, true) then
             return
           end
         end
@@ -529,7 +530,8 @@ end
 
 M.hi = function(selected)
   if #selected == 0 then return end
-  vim.cmd("hi " .. selected[1])
+  local hl = selected[1]:match("^[^%s]+")
+  vim.cmd("hi " .. hl)
   vim.cmd("echo")
 end
 
@@ -758,6 +760,29 @@ M.help = function(selected, opts)
   vim.cmd("help " .. helptags(selected, opts)[1])
 end
 
+M.help_curwin = function(selected, opts)
+  if #selected == 0 then return end
+  local helpcmd
+  local is_shown = false
+  local current_win_number = 1
+  local last_win_number = vim.fn.winnr("$")
+  while current_win_number <= last_win_number do
+    local buffer = vim.api.nvim_win_get_buf(vim.fn.win_getid(current_win_number))
+    local type = vim.api.nvim_get_option_value("buftype", { buf = buffer })
+    if type == "help" then
+      is_shown = true
+      break
+    end
+    current_win_number = current_win_number + 1
+  end
+  if is_shown then
+    helpcmd = "help "
+  else
+    helpcmd = "enew | setlocal bufhidden=wipe | setlocal buftype=help | keepjumps help "
+  end
+  vim.cmd(helpcmd .. helptags(selected, opts)[1])
+end
+
 M.help_vert = function(selected, opts)
   if #selected == 0 then return end
   vim.cmd("vert help " .. helptags(selected, opts)[1])
@@ -801,9 +826,12 @@ M.git_switch = function(selected, opts)
     cmd = path.git_cwd({ "git", "switch" }, opts)
   end
   -- remove anything past space
-  local branch = selected[1]:match("[^ ]+")
+  local marker, branch = selected[1]:match("%s-([%+%*]?)%s+([^ ]+)")
   -- do nothing for active branch
-  if branch:find("%*") ~= nil then return end
+  if marker == "*" then
+    utils.warn("already on bramch '%s'", branch)
+    return
+  end
   if branch:find("^remotes/") then
     if opts.remotes == "detach" then
       table.insert(cmd, "--detach")
@@ -813,6 +841,12 @@ M.git_switch = function(selected, opts)
   end
   table.insert(cmd, branch)
   local output, rc = utils.io_systemlist(cmd)
+  if marker == "+" then
+    assert(rc ~= 0) -- should err with worktree path
+    local worktree_path = output[1]:match([[([^']+)'$]])
+    utils.warn("'%s' is a worktree, changing directory to '%s'", branch, worktree_path)
+    return M.git_worktree_cd({ worktree_path }, opts)
+  end
   if rc ~= 0 then
     utils.error(unpack(output))
   else
@@ -826,7 +860,7 @@ M.git_branch_add = function(selected, opts)
   -- so the prompt input will be found in `selected[1]`
   -- previous fzf versions (or skim) restart the process instead
   -- so the prompt input will be found in `opts.last_query`
-  local branch = opts.last_query or selected[1]
+  local branch = selected[1] or opts.last_query
   if type(branch) ~= "string" or #branch == 0 then
     utils.warn("Branch name cannot be empty, use prompt for input.")
   else
@@ -845,7 +879,7 @@ M.git_branch_del = function(selected, opts)
   if #selected == 0 then return end
   local cmd_del_branch = path.git_cwd(opts.cmd_del, opts)
   local cmd_cur_branch = path.git_cwd({ "git", "rev-parse", "--abbrev-ref", "HEAD" }, opts)
-  local branch = selected[1]:match("[^%s%*]+")
+  local branch = selected[1]:match("^[%*+]*[%s]*[(]?([^%s)]+)")
   local cur_branch = utils.io_systemlist(cmd_cur_branch)[1]
   if branch == cur_branch then
     utils.warn("Cannot delete active branch '%s'", branch)
@@ -879,6 +913,53 @@ M.git_worktree_cd = function(selected, opts)
     utils.info(("cwd set to '%s'"):format(cwd))
   else
     utils.warn(("Unable to set cwd to '%s', directory is not accessible"):format(cwd))
+  end
+end
+
+M.git_worktree_add = function(selected, opts)
+  local branch = selected[1] or opts.last_query
+  branch = branch:match("[^%*%+%s]+")
+  if type(branch) ~= "string" or #branch == 0 then
+    utils.warn("Branch name cannot be empty, use prompt for input.")
+  else
+    local worktree_path = path.join({ "..", branch })
+
+    local cmd_branch_check = path.git_cwd(
+      { "git", "show-ref", "--verify", "--quiet", "refs/heads/" .. branch }, opts)
+    local _, check_rc = utils.io_systemlist(cmd_branch_check)
+
+    local cmd_add
+    if check_rc == 0 then
+      cmd_add = path.git_cwd({ "git", "worktree", "add", worktree_path, branch }, opts)
+    else
+      cmd_add = path.git_cwd({ "git", "worktree", "add", worktree_path, "-b", branch }, opts)
+    end
+
+    local output, rc = utils.io_systemlist(cmd_add)
+    if rc ~= 0 then
+      utils.error("git worktree add failed, %s", output and output[#output] or "nil")
+    else
+      utils.info("Created worktree '%s' at '%s'.", branch, worktree_path)
+    end
+  end
+end
+
+M.git_worktree_del = function(selected, opts)
+  if #selected == 0 then return end
+  local worktree_path = selected[1]:match("^[^%s]+")
+  local current_cwd = vim.uv.cwd()
+  if worktree_path == current_cwd or path.normalize(worktree_path) == path.normalize(current_cwd) then
+    utils.warn("Cannot delete current worktree '%s'", worktree_path)
+    return
+  end
+  if vim.fn.confirm("Delete worktree " .. worktree_path .. "?", "&Yes\n&No") == 1 then
+    local cmd_del = path.git_cwd({ "git", "worktree", "remove", worktree_path }, opts)
+    local output, rc = utils.io_systemlist(cmd_del)
+    if rc ~= 0 then
+      utils.error(unpack(output))
+    else
+      utils.info("Deleted worktree '%s'.", worktree_path)
+    end
   end
 end
 

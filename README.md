@@ -286,6 +286,8 @@ Fzf-Lua conveniently comes with a VS-Code like picker by default
 | `lsp_live_workspace_symbols` | Workspace Symbols (live query)   |
 | `lsp_incoming_calls`         | Incoming Calls                   |
 | `lsp_outgoing_calls`         | Outgoing Calls                   |
+| `lsp_type_sub`               | Sub Types                        |
+| `lsp_type_super`             | Super Types                     |
 | `lsp_code_actions`           | Code Actions                     |
 | `lsp_finder`                 | All LSP locations, combined view |
 | `diagnostics_document`       | Document Diagnostics             |
@@ -833,6 +835,7 @@ previewers = {
     hidden             = true,          -- enable hidden files by default
     follow             = false,         -- do not follow symlinks by default
     no_ignore          = false,         -- respect ".gitignore"  by default
+    absolute_path      = false,         -- display absolute paths
     actions = {
       -- inherits from 'actions.files', here we can override
       -- or set bind to 'false' to disable a default action
@@ -1265,6 +1268,8 @@ previewers = {
         symbol_fmt        = function(s, opts) return "[" .. s .. "]" end,
         -- prefix child symbols. set to any string or `false` to disable
         child_prefix      = true,
+        -- prepend parent to symbol, set to any string or `false` to disable
+        -- parent_postfix    = ".",
         fzf_opts          = { ["--tiebreak"] = "begin" },
     },
     code_actions = {
@@ -1293,6 +1298,8 @@ previewers = {
             { "implementations", prefix = FzfLua.utils.ansi_codes.green("impl") },
             { "incoming_calls",  prefix = FzfLua.utils.ansi_codes.cyan("in  ") },
             { "outgoing_calls",  prefix = FzfLua.utils.ansi_codes.yellow("out ") },
+            { "type_sub",        prefix = FzfLua.utils.utils.ansi_codes.cyan("sub ") },
+            { "type_super",      prefix = FzfLua.utils.utils.ansi_codes.yellow("supr") },
         },
     }
   },
@@ -1619,6 +1626,9 @@ temporarily overridden by its corresponding `winopts` option:
 | FzfLuaFilePart          | @none            | `hls.file_part`      | Path formatters file hl group         |
 | FzfLuaLivePrompt        | \*PaleVioletRed1 | `hls.live_prompt`    | "live" queries prompt text            |
 | FzfLuaLiveSym           | \*PaleVioletRed1 | `hls.live_sym`       | LSP live symbols query match          |
+| FzfLuaCmdEx             | Statement        | `hls.cmd_ex`         | Ex commands in `commands`             |
+| FzfLuaCmdBuf            | Added            | `hls.cmd_buf`        | Buffer commands in `commands`         |
+| FzfLuaCmdGlobal         | Directory        | `hls.cmd_global`     | Global commands in `commands`         |
 | FzfLuaFzfNormal         | FzfLuaNormal     | `fzf.normal`         | fzf's `fg\|bg`                        |
 | FzfLuaFzfCursorLine     | FzfLuaCursorLine | `fzf.cursorline`     | fzf's `fg+\|bg+`                      |
 | FzfLuaFzfMatch          | Special          | `fzf.match`          | fzf's `hl+`                           |

@@ -536,7 +536,8 @@ M.defaults.git                   = {
     _treesitter   = function(line) return line:match("(%s+)(%d+)%)(.+)$") end,
   },
   branches = {
-    cmd        = "git branch --all --color",
+    cmd        = [[git branch --all --color -vv ]]
+        .. [[--sort=-'committerdate' --sort='refname:rstrip=-2' --sort=-'HEAD']],
     preview    = "git log --graph --pretty=oneline --abbrev-commit --color {1}",
     remotes    = "local",
     actions    = {
@@ -546,7 +547,7 @@ M.defaults.git                   = {
     },
     cmd_add    = { "git", "branch" },
     cmd_del    = { "git", "branch", "--delete" },
-    fzf_opts   = { ["--no-multi"] = true },
+    fzf_opts   = { ["--no-multi"] = true, ["--tiebreak"] = "begin" },
     _headers   = { "actions", "cwd" },
     _multiline = false,
   },
@@ -556,7 +557,9 @@ M.defaults.git                   = {
     preview    = [[git log --color --pretty=format:"%C(yellow)%h%Creset ]]
         .. [[%Cgreen(%><(12)%cr%><|(12))%Creset %s %C(blue)<%an>%Creset"]],
     actions    = {
-      ["enter"] = actions.git_worktree_cd,
+      ["enter"]  = actions.git_worktree_cd,
+      ["ctrl-x"] = { fn = actions.git_worktree_del, reload = true },
+      ["ctrl-a"] = { fn = actions.git_worktree_add, field_index = "{q}", reload = true },
     },
     fzf_opts   = { ["--no-multi"] = true },
     _headers   = { "actions", "cwd" },
@@ -1039,6 +1042,7 @@ M.defaults.lsp.symbols           = {
   symbol_hl        = function(s) return "@" .. s:lower() end,
   symbol_fmt       = function(s, _) return "[" .. s .. "]" end,
   child_prefix     = true,
+  parent_postfix   = false,
   async_or_timeout = true,
   -- new formatting options with symbol name at the start
   fzf_opts         = {
@@ -1115,6 +1119,8 @@ M.defaults.lsp.finder            = {
     implementations = true,
     incoming_calls  = true,
     outgoing_calls  = true,
+    type_sub        = true,
+    type_super      = true,
   },
   -- by default display all supported providers
   providers   = {
@@ -1125,6 +1131,8 @@ M.defaults.lsp.finder            = {
     { "references",      prefix = utils.ansi_codes.blue("ref ") },
     { "incoming_calls",  prefix = utils.ansi_codes.cyan("in  ") },
     { "outgoing_calls",  prefix = utils.ansi_codes.yellow("out ") },
+    { "type_sub",        prefix = utils.ansi_codes.cyan("sub ") },
+    { "type_super",      prefix = utils.ansi_codes.yellow("supr") },
   },
   fzf_opts    = { ["--multi"] = true },
   _treesitter = true,
@@ -1231,6 +1239,7 @@ M.defaults.commands              = {
   actions         = { ["enter"] = actions.ex_run },
   flatten         = {},
   include_builtin = true,
+  _cached_hls     = { "cmd_ex", "cmd_buf", "cmd_global" },
 }
 
 M.defaults.autocmds              = {
@@ -1456,6 +1465,9 @@ M.defaults.__HLS                 = {
   file_part      = "FzfLuaFilePart",
   live_prompt    = "FzfLuaLivePrompt",
   live_sym       = "FzfLuaLiveSym",
+  cmd_ex         = "FzfLuaCmdEx",
+  cmd_buf        = "FzfLuaCmdBuf",
+  cmd_global     = "FzfLuaCmdGlobal",
   fzf            = {
     normal     = "FzfLuaFzfNormal",
     cursorline = "FzfLuaFzfCursorLine",
