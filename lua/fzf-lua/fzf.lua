@@ -3,32 +3,13 @@
 -- does not close the pipe before all writes are complete
 -- option to not add '\n' on content function callbacks
 -- https://github.com/vijaymarupudi/nvim-fzf/blob/master/lua/fzf.lua
+---@diagnostic disable-next-line: deprecated
 local uv = vim.uv or vim.loop
 
 local utils = require "fzf-lua.utils"
 local libuv = require "fzf-lua.libuv"
 
 local M = {}
-
--- workaround to a potential 'tempname' bug? (#222)
--- neovim doesn't guarantee the existence of the
--- parent temp dir potentially failing `mkfifo`
--- https://github.com/neovim/neovim/issues/1432
--- https://github.com/neovim/neovim/pull/11284
-local function tempname()
-  local tmpname = vim.fn.tempname()
-  local parent = vim.fn.fnamemodify(tmpname, ":h")
-  -- parent must exist for `mkfifo` to succeed
-  -- if the neovim temp dir was deleted or the
-  -- tempname already exists, we use 'os.tmpname'
-  if not uv.fs_stat(parent) or uv.fs_stat(tmpname) then
-    tmpname = os.tmpname()
-    -- 'os.tmpname' touches the file which
-    -- will also fail `mkfifo`, delete it
-    vim.fn.delete(tmpname)
-  end
-  return tmpname
-end
 
 -- contents can be either a table with tostring()able items, or a function that
 -- can be called repeatedly for values. The latter can use coroutines for async
@@ -47,7 +28,7 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
 
   if not opts then opts = {} end
   local cmd = { opts.fzf_bin or "fzf" }
-  local outputtmpname = tempname()
+  local outputtmpname = utils.tempname()
 
   -- we use a temporary env $FZF_DEFAULT_COMMAND instead of piping
   -- the command to fzf, this way fzf kills the command when it exits.
@@ -122,7 +103,7 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
   end
 
   local co = coroutine.running()
-  local jobstart = opts.is_fzf_tmux and vim.fn.jobstart or utils.termopen
+  local jobstart = _G.fzf_jobstart or opts.is_fzf_tmux and vim.fn.jobstart or utils.termopen
   local shell_cmd = utils.__IS_WINDOWS
       -- MSYS2 comes with "/usr/bin/cmd" that precedes "cmd.exe" (#1396)
       and { "cmd.exe", "/d", "/e:off", "/f:off", "/v:off", "/c" }
@@ -180,7 +161,7 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
       ["RUST_LOG"] = "",
     },
     on_exit = function(_, rc, _)
-      local output = {}
+      local output = nil ---@type string[]?
       local f = io.open(outputtmpname)
       if f then
         output = vim.split(f:read("*a"), printEOL)
@@ -191,7 +172,7 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
       -- Windows only, restore `shellslash` if was true before `jobstart`
       if nvim_opt_shellslash then vim.o.shellslash = nvim_opt_shellslash end
       vim.fn.delete(outputtmpname)
-      if #output == 0 then output = nil end
+      if output and #output == 0 then output = nil end
       coroutine.resume(co, output, rc)
     end
   })
