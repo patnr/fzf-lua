@@ -227,6 +227,58 @@ function M.normalize_opts(opts, globals, __resume_key) ---@diagnostic disable
     opts = M.resume_opts(opts)
   end
 
+  local executable = function(binary, fncerr, strerr)
+    if binary and vim.fn.executable(binary) ~= 1 then
+      fncerr(("'%s' is not a valid executable, %s"):format(binary, strerr))
+      return false
+    end
+    return true
+  end
+
+  -- Validate the fzf binary & version dependency
+  opts.fzf_bin = opts.fzf_bin or M.globals.fzf_bin
+  opts.fzf_bin = opts.fzf_bin and libuv.expand(opts.fzf_bin) or nil
+  if not opts.fzf_bin or
+      not executable(opts.fzf_bin, utils.warn, "fallback to 'fzf'.") then
+    -- default|fallback to fzf
+    opts.fzf_bin = "fzf"
+    -- try fzf plugin if fzf is not installed globally
+    if vim.fn.executable(opts.fzf_bin) ~= 1 then
+      local ok, fzf_plug = pcall(vim.api.nvim_call_function, "fzf#exec", {})
+      if ok and fzf_plug then
+        opts.fzf_bin = fzf_plug
+      end
+    end
+    if not executable(opts.fzf_bin, utils.error,
+          "aborting. Please make sure 'fzf' is in installed.") then
+      return nil
+    end
+  end
+
+  -- enforce fzf minimum requirements
+  vim.g.fzf_lua_fzf_version = nil
+  if opts.fzf_bin:match("sk$") then
+    local SK_VERSION, rc, err = utils.sk_version(opts)
+    opts.__SK_VERSION = SK_VERSION
+    if not opts.__SK_VERSION then
+      utils.error("'sk --version' failed with error %s: %s", rc, err)
+      return nil
+    end
+  else
+    local FZF_VERSION, rc, err = utils.fzf_version(opts)
+    opts.__FZF_VERSION = FZF_VERSION
+    vim.g.fzf_lua_fzf_version = FZF_VERSION
+    if not opts.__FZF_VERSION then
+      utils.error("'fzf --version' failed with error %s: %s", rc, err)
+      return nil
+    elseif not utils.has(opts, "fzf", { 0, 36 }) then
+      utils.error("fzf version %s is lower than minimum (0.36), aborting.",
+        utils.ver2str(opts.__FZF_VERSION))
+      return nil
+    end
+  end
+
+
   local function convert_bool_opts()
     -- Enforce conversion of boolean options that are tables with `enabled`
     -- property, i.e. `winopts.treesitter = true` will be converted to
@@ -656,59 +708,6 @@ function M.normalize_opts(opts, globals, __resume_key) ---@diagnostic disable
   -- test for valid git_repo
   opts.git_icons = opts.git_icons and path.is_git_repo(opts, true)
 
-  local executable = function(binary, fncerr, strerr)
-    if binary and vim.fn.executable(binary) ~= 1 then
-      fncerr(("'%s' is not a valid executable, %s"):format(binary, strerr))
-      return false
-    end
-    return true
-  end
-
-  opts.fzf_bin = opts.fzf_bin or M.globals.fzf_bin
-  opts.fzf_bin = opts.fzf_bin and libuv.expand(opts.fzf_bin) or nil
-  if not opts.fzf_bin or
-      not executable(opts.fzf_bin, utils.warn, "fallback to 'fzf'.") then
-    -- default|fallback to fzf
-    opts.fzf_bin = "fzf"
-    -- try fzf plugin if fzf is not installed globally
-    if vim.fn.executable(opts.fzf_bin) ~= 1 then
-      local ok, fzf_plug = pcall(vim.api.nvim_call_function, "fzf#exec", {})
-      if ok and fzf_plug then
-        opts.fzf_bin = fzf_plug
-      end
-    end
-    if not executable(opts.fzf_bin, utils.error,
-          "aborting. Please make sure 'fzf' is in installed.") then
-      return nil
-    end
-  end
-
-  -- are we using skim?
-  opts._is_skim = opts.fzf_bin:match("sk$") ~= nil
-
-  -- enforce fzf minimum requirements
-  vim.g.fzf_lua_fzf_version = nil
-  if not opts._is_skim then
-    local FZF_VERSION, rc, err = utils.fzf_version(opts)
-    opts.__FZF_VERSION = FZF_VERSION
-    vim.g.fzf_lua_fzf_version = FZF_VERSION
-    if not opts.__FZF_VERSION then
-      utils.error("'fzf --version' failed with error %s: %s", rc, err)
-      return nil
-    elseif not utils.has(opts, "fzf", { 0, 36 }) then
-      utils.error("fzf version %s is lower than minimum (0.36), aborting.",
-        utils.ver2str(opts.__FZF_VERSION))
-      return nil
-    end
-  else
-    local SK_VERSION, rc, err = utils.sk_version(opts)
-    opts.__SK_VERSION = SK_VERSION
-    if not opts.__SK_VERSION then
-      utils.error("'sk --version' failed with error %s: %s", rc, err)
-      return nil
-    end
-  end
-
   if utils.has(opts, "fzf", { 0, 53 })
       -- `_multiline` is used to override `multiline` inherited from `defaults = {}`
       and opts.multiline and opts._multiline ~= false then
@@ -745,20 +744,44 @@ function M.normalize_opts(opts, globals, __resume_key) ---@diagnostic disable
     local bin, version, changelog = (function()
       if opts.__SK_VERSION then
         return "sk", opts.__SK_VERSION, {
+          -- All fzf flags values not support by skim (https://github.com/skim-rs/skim/issues/628)
+          ["99.9.9"] = {
+            fzf_opts = {
+              ["--border"]           = { "none" },
+              ["--info"]             = { "inline-right" },
+              ["--border-label-pos"] = true,
+              ["--info-command"]     = true,
+            }
+          },
+          ["1.5.3"] = {
+            fzf_opts = {
+              ["--border"] = { "plain", "rounded", "double", "thick", "light-double-dashed",
+                "heavy-double-dashed", "light-triple-dashed", "heavy-triple-dashed",
+                "light-quadruple-dashed", "heavy-quadruple-dashed", "quadrant-inside",
+                "quadrant-outside" },
+              ["--algo"]   = "frizbee"
+            }
+          },
           ["0.15.5"] = { fzf_opts = { ["--tmux"] = true } },
-          ["0.53"] = { fzf_opts = { ["--inline-info"] = true } },
+          ["0.53"] = {
+            fzf_opts = {
+              ["--inline-info"] = true,
+              ["--algo"]        = { "skim_v1", "skim_v2" },
+            }
+          },
           -- All fzf flags not existing in skim
           ["all"] = {
             fzf_opts = {
               ["--scheme"]         = false,
               ["--gap"]            = false,
-              ["--info"]           = false,
-              ["--border"]         = false,
               ["--scrollbar"]      = false,
               ["--no-scrollbar"]   = false,
               ["--wrap"]           = true,
               ["--wrap-sign"]      = true,
               ["--highlight-line"] = false,
+              ["--gutter"]         = false,
+              ["--border-label"]   = false,
+              ["--ellipsis"]       = true,
             }
           },
         }
@@ -811,6 +834,7 @@ function M.normalize_opts(opts, globals, __resume_key) ---@diagnostic disable
           -- All skim flags not existing in fzf
           ["all"] = {
             fzf_opts = {
+              ["--algo"] = false,
               ["--inline-info"] = false,
             }
           },
@@ -957,6 +981,12 @@ function M.normalize_opts(opts, globals, __resume_key) ---@diagnostic disable
         or opts.fn_transform_cmd)
   then
     opts.fn_preprocess = [[return require("fzf-lua.make_entry").preprocess]]
+  end
+
+  -- set by git_{commits|diff|hunks} actions
+  if utils.get_info().cmd and opts["__pos_" .. utils.get_info().cmd] then
+    opts.locate = opts.locate == nil and true or opts.locate
+    opts.__locate_pos = opts.__locate_pos or opts["__pos_" .. utils.get_info().cmd]
   end
 
   if opts.locate and utils.has(opts, "fzf", { 0, 36 }) then

@@ -174,7 +174,18 @@ M.ui_select = function(items, ui_opts, on_choice)
     -- options over `lsp.code_actions` (#999)
     opts_merge_strategy = "force"
   end
-  if _OPTS_ONCE then
+
+  if ui_opts.preview_item then
+    opts.previewer = {
+      _ctor = function()
+        local previewer = require("fzf-lua.previewer.builtin").buffer_or_file:extend()
+        ---@diagnostic disable-next-line: unused
+        function previewer:parse_entry(entry_str, cb) return ui_opts.preview_item(entry_str, cb) end
+
+        return previewer
+      end
+    }
+  elseif _OPTS_ONCE then
     -- merge and clear the once opts sent from lsp_code_actions.
     -- We also override actions to guarantee a single default
     -- action, otherwise selected[1] will be empty due to
@@ -201,7 +212,7 @@ M.ui_select = function(items, ui_opts, on_choice)
   -- casues issues with abort as on_choice(nil) won't be called (#2439)
   opts.no_hide = opts.no_hide == nil and true or opts.no_hide
 
-  return core.fzf_exec(entries, opts)
+  core.fzf_exec(entries, opts)
 end
 
 return M

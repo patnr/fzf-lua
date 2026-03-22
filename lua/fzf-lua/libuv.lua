@@ -47,6 +47,11 @@ local function coroutinify(fn)
 end
 
 -- fix environ for uv.spawn
+---@param cmd string
+---@param opts uv.spawn.options
+---@param on_exit fun(code: integer, signal: integer)
+---@return uv.uv_process_t handle
+---@return integer pid
 M.uv_spawn = function(cmd, opts, on_exit)
   opts.env = (function()
     -- uv.spawn will override all env when table provided?
@@ -60,10 +65,9 @@ M.uv_spawn = function(cmd, opts, on_exit)
       renv[#renv + 1] = string.format("%s=%s", k, tostring(v))
     end
     return renv
-  end)()
-  return uv.spawn(cmd, opts, on_exit)
+  end)() ---@diagnostic disable-next-line: unnecessary-assert, return-type-mismatch
+  return assert(uv.spawn(cmd, opts, on_exit))
 end
-if false then M.uv_spawn = uv.spawn end
 
 
 ---@class fzf-lua.SpawnOpts
@@ -407,7 +411,7 @@ local posix_exec = function(cmd)
 end
 
 ---@param opts fzf-lua.SpawnStdioOpts
----@return uv.uv_process_t, integer
+---@return uv.uv_process_t?, integer?
 M.spawn_stdio = function(opts)
   -- stdin/stdout are already buffered, not stderr. This means
   -- that every character is flushed immediately which caused
@@ -540,12 +544,13 @@ M.spawn_stdio = function(opts)
   local on_finish = function(code)
     pipe_close(stdout)
     pipe_close(stderr)
-    if fn_postprocess then
+    if vim.in_fast_event() and fn_postprocess then
       vim.schedule(function()
         fn_postprocess(opts)
         exit(code)
       end)
     else
+      if fn_postprocess then fn_postprocess(opts) end
       exit(code)
     end
   end
@@ -595,12 +600,18 @@ M.spawn_stdio = function(opts)
     local wn = function(s) if s then return io.stdout:write(f(s)) else on_finish(0) end end
     if opts.is_live then ---@cast content fzf-lua.shell.data2
       local res = content(args(), opts)
-      if not res then on_finish(0) end ---@cast res-?
+      if not res then return on_finish(0), nil end ---@cast res-?
       content = res
     end
     if type(content) == "function" then content(w, wn) end
     if type(content) == "table" then for _, v in ipairs(content) do w(v) end end
-    if type(content) ~= "string" then on_finish(0) end ---@cast content string
+    -- Table/function content was already written to stdout above, the only
+    -- content type that requires spawning a child process is a string command.
+    -- Without this guard, when `fn_postprocess` is set, `on_finish` defers
+    -- `os.exit` via `vim.schedule` and the code falls through to `M.spawn`
+    -- which would attempt to execute the table content as a shell command,
+    -- resulting in errors like "sh: 1: 1:: not found" appearing as fzf items.
+    if type(content) ~= "string" then return on_finish(0), nil end ---@cast content string
     cmd = content
     if opts.debug then
       io.stdout:write(("[DEBUG] [mt] %s" .. EOL):format(content))

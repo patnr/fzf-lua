@@ -93,15 +93,33 @@ describe("Testing utils module", function()
   end)
 
   it("wo", function()
+    -- store mini.test float so we can return to it when
+    -- testing in main instance
+    local win = vim.api.nvim_get_current_win()
+    vim.cmd.new()
     utils.wo.nonexist = "this is nop"
     eq(nil, utils.wo.nonexist)
+
     vim.wo[0][0].nu = true -- setlocal
     vim.wo[0].rnu = true   -- setglobal
     eq(vim.wo[0][0].nu, vim.wo.nu)
     eq(vim.wo[0][0].rnu, vim.wo.rnu)
+    vim.api.nvim_buf_delete(0, { force = true })
     vim.cmd.new()
     eq(vim.wo[0][0].nu, vim.wo.nu)
     eq(vim.wo[0][0].rnu, vim.wo.rnu)
+    vim.api.nvim_buf_delete(0, { force = true })
+
+    -- same behavior
+    utils.wo[0][0].nu = true -- setlocal
+    utils.wo[0].rnu = true   -- setglobal
+    eq(utils.wo[0][0].nu, utils.wo.nu)
+    eq(utils.wo[0][0].rnu, utils.wo.rnu)
+    vim.cmd.new()
+    eq(utils.wo[0][0].nu, utils.wo.nu)
+    eq(utils.wo[0][0].rnu, utils.wo.rnu)
+    vim.api.nvim_buf_delete(0, { force = true })
+    vim.api.nvim_set_current_win(win)
   end)
 
   it("strsplit", function()

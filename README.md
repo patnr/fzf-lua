@@ -48,9 +48,9 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim)
   -- dependencies = { "nvim-mini/mini.icons" },
   ---@module "fzf-lua"
   ---@type fzf-lua.Config|{}
-  ---@diagnostics disable: missing-fields
+  ---@diagnostic disable: missing-fields
   opts = {}
-  ---@diagnostics enable: missing-fields
+  ---@diagnostic enable: missing-fields
 }
 ```
 
@@ -201,6 +201,7 @@ Fzf-Lua conveniently comes with a VS-Code like picker by default
 | `buffers`        | open buffers                      |
 | `files`          | `find` or `fd` on a path          |
 | `oldfiles`       | opened files history              |
+| `history`        | opened buffers/files history      |
 | `quickfix`       | quickfix list                     |
 | `quickfix_stack` | quickfix stack                    |
 | `loclist`        | location list                     |
@@ -1050,8 +1051,6 @@ previewers = {
       -- uncomment to enable '.gitignore' toggle for grep
       -- ["ctrl-r"]   = { actions.toggle_ignore }
     },
-    no_header             = false,    -- hide grep|cwd header?
-    no_header_i           = false,    -- hide interactive header?
   },
   args = {
     prompt            = 'Args❯ ',
@@ -1067,6 +1066,7 @@ previewers = {
     -- stat_file = FzfLua.utils.file_is_readable,
     -- stat_file = function() return true end,
     include_current_session = false,  -- include bufs from current session
+    ignore_current_buffer   = true,   -- exclude current buf from session
   },
   buffers = {
     prompt            = 'Buffers❯ ',
@@ -1139,8 +1139,6 @@ previewers = {
       -- this action toggles between 'grep' and 'live_grep'
       ["ctrl-g"]          = { actions.grep_lgrep }
     },
-    no_header             = false,    -- hide grep|cwd header?
-    no_header_i           = false,    -- hide interactive header?
   },
   btags = {
     prompt                = 'BTags❯ ',

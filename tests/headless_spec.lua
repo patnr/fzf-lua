@@ -9,13 +9,13 @@ local exec_lua = child.lua
 ---@diagnostic disable-next-line: param-type-mismatch
 local _mini_path = vim.fs.joinpath(vim.fn.stdpath("data"), "lazy", "mini.nvim")
 if not vim.uv.fs_stat(_mini_path) then
-  _mini_path = vim.fs.joinpath("deps", "mini.nvim")
+  _mini_path = vim.fs.abspath(vim.fs.joinpath("deps", "mini.nvim"))
 end
 
 ---@diagnostic disable-next-line: param-type-mismatch
 local _devicons_path = vim.fs.joinpath(vim.fn.stdpath("data"), "lazy", "nvim-web-devicons")
 if not vim.uv.fs_stat(_devicons_path) then
-  _devicons_path = vim.fs.joinpath("deps", "nvim-web-devicons")
+  _devicons_path = vim.fs.abspath(vim.fs.joinpath("deps", "nvim-web-devicons"))
 end
 
 local T = helpers.new_set_with_child(child, {
@@ -45,13 +45,19 @@ local exec_term = function(c, cmd, args)
   eq(tonumber(id) > 0, true)
   c.lua(string.format("vim.fn.jobwait({%s})", tostring(id)))
   c.wait_until(function()
-    local lines = c.get_lines()
-    for i = #lines, 1, -1 do
-      if lines[i] == "" then
-        table.remove(lines, i)
+    if FzfLua.utils.__HAS_NVIM_012 then
+      -- https://github.com/neovim/neovim/pull/37987
+      local exitcode = c.lua_get("vim.api.nvim_get_chan_info(vim.bo.channel).exitcode")
+      return tonumber(exitcode) == 0
+    else
+      local lines = c.get_lines()
+      for i = #lines, 1, -1 do
+        if lines[i] == "" then
+          table.remove(lines, i)
+        end
       end
+      return lines[#lines] == "[Process exited 0]"
     end
-    return lines[#lines] == "[Process exited 0]"
   end)
 end
 
@@ -60,8 +66,12 @@ T["headless"]["file_icons"]["devicons - manual"] = new_set({ parametrize = { { f
     function(icons)
       helpers.SKIP_IF_WIN()
       -- helpers.SKIP_IF_NOT_LINUX()
-      exec_term(child,
-        { "./scripts/headless_fd.sh", "-x", "rg --files --sort=path", "-f", tostring(icons) })
+      exec_term(child, {
+        vim.fs.abspath("./scripts/headless_fd.sh"),
+        "-c", vim.fs.joinpath(child.loop.cwd(), "scripts"),
+        "-x", "rg --files --sort=path",
+        "-f", tostring(icons),
+      })
       child.expect_screenshot({ ignore_text = { 24 }, ignore_attr = { 25 } })
     end,
   })
@@ -84,8 +94,12 @@ T["headless"]["file_icons"]["server"] = new_set({ parametrize = { { "devicons" }
     local new_child = helpers.new_child_neovim()
     new_child.start()
     new_child.o.statusline = "fzf://"
-    exec_term(new_child,
-      { "./scripts/headless_fd.sh", "-x", "rg --files --sort=path", "-f", icons },
+    exec_term(new_child, {
+        vim.fs.abspath("./scripts/headless_fd.sh"),
+        "-c", vim.fs.joinpath(child.loop.cwd(), "scripts"),
+        "-x", "rg --files --sort=path",
+        "-f", icons,
+      },
       { env = { ["FZF_LUA_SERVER"] = fzf_lua_server } })
     -- Ignore script path and attr the next line
     new_child.expect_screenshot({ ignore_text = { 23 }, ignore_attr = { 24 } })

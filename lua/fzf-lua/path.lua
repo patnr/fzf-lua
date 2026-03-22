@@ -290,7 +290,7 @@ end
 ---@param str string
 ---@param start_idx integer
 ---@return integer?
-local function find_next_separator(str, start_idx)
+function M.find_next_separator(str, start_idx)
   local SEPARATOR_BYTES = utils._if_win(
     { M.fslash_byte, M.bslash_byte }, { M.fslash_byte })
   for i = start_idx or 1, #str do
@@ -305,7 +305,7 @@ end
 ---@param s string
 ---@param i? integer
 ---@return integer?
-local function utf8_char_len(s, i)
+function M.utf8_char_len(s, i)
   -- Get byte count of unicode character (RFC 3629)
   local c = string_byte(s, i or 1)
   if not c then
@@ -338,7 +338,7 @@ local function utf8_sub(s, from, to)
   local byte_i, utf8_i = from, from
   -- Concat utf8 chars until "to" or end of string
   while byte_i <= #s and (not to or utf8_i <= to) do
-    local c_len = utf8_char_len(s, byte_i) ---@cast c_len-?
+    local c_len = M.utf8_char_len(s, byte_i) ---@cast c_len-?
     local c = string_sub(s, byte_i, byte_i + c_len - 1)
     ret = ret .. c
     byte_i = byte_i + c_len
@@ -360,7 +360,7 @@ function M.shorten(path, max_len, sep)
     start_idx = 4
   end
   repeat
-    local i = find_next_separator(path, start_idx)
+    local i = M.find_next_separator(path, start_idx)
     local end_idx = i and start_idx + math.min(i - start_idx, max_len) - 1 or nil
     local part = utf8_sub(path, start_idx, end_idx) ---@cast i-?
     if end_idx and part == "." and i - start_idx > 1 then
@@ -545,11 +545,18 @@ function M.entry_to_file(entry, opts, force_uri)
       end
     end
   end
+  local bufname
   local terminal
   if bufnr then
     terminal = utils.is_term_buffer(bufnr)
     if terminal then
       file, line = stripped:match("([^:]+):(%d+)")
+    end
+  elseif file and #file > 0 then -- get bufnr from give path
+    local buf = vim.fn.bufnr(file)
+    if buf ~= -1 and vim.api.nvim_buf_get_name(buf) == (uv.fs_realpath(file) or file) then
+      bufnr = buf
+      bufname = file
     end
   end
   if opts.path_shorten and not M.is_uri(stripped) then
@@ -559,12 +566,12 @@ function M.entry_to_file(entry, opts, force_uri)
   return {
     stripped = stripped,
     bufnr    = bufnr,
-    bufname  = bufnr and vim.api.nvim_buf_is_valid(bufnr)
-        and vim.api.nvim_buf_get_name(bufnr),
+    bufname  = bufname or (bufnr and vim.api.nvim_buf_is_valid(bufnr)
+      and vim.api.nvim_buf_get_name(bufnr) or nil),
     terminal = terminal,
     path     = file,
-    line     = utils.tointeger(opts.line_query and
-      (opts.line_query(opts._last_query or opts.last_query)) or line) or 0,
+    line     = utils.tointeger(type(opts.line_query) == "function" and
+      (opts.line_query(FzfLua.get_info().query)) or line) or 0,
     col      = utils.tointeger(col) or 0,
     ctag     = opts._ctag and M.entry_to_ctag(stripped) or nil,
     debug    = opts.debug and entry:match("^%[DEBUG]") and entry or nil,
@@ -573,6 +580,9 @@ end
 
 ---@overload fun(cmd: string, opts: table): string
 ---@overload fun(cmd: string[], opts: table): string[]
+---@param cmd string|string[]
+---@param opts table
+---@return string|string[]
 function M.git_cwd(cmd, opts)
   local git_args = {
     { "cwd",          "-C" },

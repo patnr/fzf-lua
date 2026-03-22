@@ -86,8 +86,10 @@ M.ACTION_DEFINITIONS = {
   [actions.git_worktree_del]  = { "delete worktree" },
   [actions.ex_run]            = { "edit" },
   [actions.ex_run_cr]         = { "execute" },
+  [actions.ex_del]            = { "delete" },
   [actions.search]            = { "edit" },
   [actions.search_cr]         = { "search" },
+  [actions.search_del]        = { "delete" },
 }
 
 -- converts contents array sent to `fzf_exec` into a single contents
@@ -323,7 +325,8 @@ M.fzf = function(contents, opts)
   opts.actions = opts.actions or {}
   opts.keymap = opts.keymap or {}
   opts.keymap.fzf = opts.keymap.fzf or {}
-  for _, k in ipairs({ "ctrl-c", "ctrl-q", "esc", "enter" }) do
+  for _, k in ipairs({ "ctrl-c", "esc", "enter", not utils.has(opts, "sk") and "ctrl-q" or nil })
+  do
     if opts.actions[k] == nil and (opts.keymap.fzf[k] == nil or opts.keymap.fzf[k] == "abort")
     then
       opts.actions[k] = actions.dummy_abort
@@ -376,15 +379,28 @@ M.fzf = function(contents, opts)
       -- Only enable flex layout native rotate if native previewer size > 0
       and not (opts.fzf_opts["--preview-window"] or ""):match(":0")
   then
-    win.on_SIGWINCH(opts, nil, function(args)
+    win.on_SIGWINCH(opts, 1, function(args)
       -- Only set the layout if preview isn't hidden
       if not tonumber(args[1]) then return end
       -- NOTE: do not use local ref `fzf_win` as it my change on resume (#2255)
       local winobj = utils.fzf_winobj()
-      if not winobj then return end
+      if not winobj or winobj.closing then return end
       return string.format("change-preview-window(%s)", winobj:normalize_preview_layout().str)
     end)
   end
+
+  -- Hijack the resize event to reload buffer/tab list on unhide
+  win.on_SIGWINCH(opts, "win.unhide", function()
+    local reload = type(opts._contents) == "string"
+        and (opts._resume_reload == true
+          ---@diagnostic disable-next-line: need-check-nil
+          or type(opts._resume_reload) == "function" and opts._resume_reload(opts))
+    if reload then
+      return string.format("%sreload:%s",
+        type(reload) == "string" and reload .. "+" or "",
+        opts._contents)
+    end
+  end)
 
   -- live command may contain field index {q}, cannot be used as FZF_DEFAULT_COMMAND
   local selected, exit_code = fzf.raw_fzf(opts.is_live and utils.shell_nop() or contents,
@@ -412,10 +428,13 @@ M.fzf = function(contents, opts)
   -- This was added by 'resume': when '--print-query' is specified
   -- we are guaranteed to have the query in the first line, save&remove it
   if selected and #selected > 0 then
-    if not (opts._is_skim and opts.is_live) then
-      -- reminder: this doesn't get called with 'live_grep' when using skim
-      -- due to a bug where '--print-query --interactive' combo is broken:
-      -- skim always prints an empty line where the typed query should be.
+    -- NOTE: this doesn't get called with 'live_grep' when using skim <v1
+    -- due to a bug where '--print-query --interactive' combo is broken:
+    -- skim always prints an empty line where the typed query should be.
+    if not (opts.is_live
+          and utils.has(opts, "sk")
+          and not utils.has(opts, "sk", { 1, 5, 3 }))
+    then
       config.resume_set("query", selected[1], opts)
     end
     table.remove(selected, 1)
@@ -441,55 +460,22 @@ M.fzf = function(contents, opts)
   return selected, exit_code
 end
 
--- Best approximation of neovim border types to fzf border types
----@param winopts fzf-lua.config.PreviewOpts
----@param metadata fzf-lua.win.borderMetadata
----@return string|table?
-local function translate_border(winopts, metadata)
-  local neovim2fzf = {
-    none       = "noborder",
-    single     = "border-sharp",
-    double     = "border-double",
-    rounded    = "border-rounded",
-    solid      = "noborder",
-    empty      = "border-block",
-    shadow     = "border-thinblock",
-    bold       = "border-bold",
-    block      = "border-block",
-    solidblock = "border-block",
-    thicc      = "border-bold",
-    thiccc     = "border-block",
-    thicccc    = "border-block",
-  }
-  local border = winopts.border
-  if not border then border = "none" end
-  if border == true then border = "border" end
-  if type(border) == "function" then
-    border = border(winopts, metadata)
-  end
-  border = type(border) == "string" and (neovim2fzf[border] or border) or nil
-  return border
-end
-
----@param o fzf-lua.config.Resolved|{}
+---@param o fzf-lua.config.Resolved
 ---@param fzf_win fzf-lua.Win
 ---@return string
 M.preview_window = function(o, fzf_win)
   local layout
-  local preview = assert(o.winopts and o.winopts.preview)
+  local preview = o.winopts.preview
+  local preview_str = fzf_win:fzf_preview_layout_str()
+  local preview_pos = preview_str:match("[^:]+") or "right"
+  local border = require("fzf-lua.win.border").fzf(preview.border,
+    { type = "fzf", name = "prev", layout = preview_pos, opts = o })
   local prefix = string.format("%s:%s%s",
     preview.hidden and "hidden" or "nohidden",
     preview.wrap and "wrap" or "nowrap",
-    (function()
-      local border = (function()
-        local preview_str = fzf_win:fzf_preview_layout_str()
-        local preview_pos = preview_str:match("[^:]+") or "right"
-        return translate_border(preview,
-          { type = "fzf", name = "prev", layout = preview_pos, opts = o })
-      end)()
-      return border and string.format(":%s", border) or ""
-    end)()
-  )
+    border and string.format(":%s", border) or "")
+  -- https://github.com/skim-rs/skim/issues/964
+  if preview.pty and utils.has(o, "sk") then prefix = "pty:" .. prefix end
   if utils.has(o, "fzf", { 0, 31 })
       -- fzf v0.45 added transform, v0.46 added resize event
       -- which we use for changing the layout on resize
@@ -519,7 +505,7 @@ M.preview_window = function(o, fzf_win)
         prefix, preview.vertical)
     end
   end
-  layout = layout or string.format("%s:%s", prefix, fzf_win:fzf_preview_layout_str())
+  layout = layout or string.format("%s:%s", prefix, preview_str)
   if o.preview_offset and #o.preview_offset > 0 then
     layout = layout .. ":" .. o.preview_offset
   end
@@ -850,6 +836,22 @@ M.set_header = function(opts)
         return opts.search and #opts.search > 0 and opts.search
       end,
     },
+    ref = {
+      hdr_txt_opt = "ref_header_txt",
+      hdr_txt_str = "ref: ",
+      hdr_txt_col = opts.hls.header_text,
+      val = function()
+        return opts.ref and #opts.ref > 0 and opts.ref
+      end,
+    },
+    ref1 = {
+      hdr_txt_opt = "ref1_header_txt",
+      hdr_txt_str = "ref1: ",
+      hdr_txt_col = opts.hls.header_text,
+      val = function()
+        return opts.ref1 and #opts.ref1 > 0 and opts.ref1
+      end,
+    },
     lsp_query = {
       hdr_txt_opt = "lsp_query_header_txt",
       hdr_txt_str = "Query: ",
@@ -952,9 +954,8 @@ M.convert_reload_actions = function(reload_cmd, opts)
   local fallback ---@type boolean?
   -- Does not work with fzf version < 0.36, fzf fails with
   -- "error 2: bind action not specified:" (#735)
-  -- Not yet supported with skim
-  if not utils.has(opts, "fzf", { 0, 36 })
-      or utils.has(opts, "sk")
+  -- skim require 0.12+ https://github.com/skim-rs/skim/pull/604
+  if (not utils.has(opts, "fzf", { 0, 36 }) and not utils.has(opts, "sk", { 0, 12, 0 }))
       or not reload_cmd then
     fallback = true
   end
@@ -1037,7 +1038,7 @@ end
 ---@return table
 M.convert_exec_silent_actions = function(opts)
   -- `execute-silent` actions are bugged with skim (can't use quotes)
-  if utils.has(opts, "sk") then
+  if utils.has(opts, "sk") and not utils.has(opts, "sk", { 1, 5, 3 }) then
     return opts
   end
   for k, v in pairs(opts.actions) do
@@ -1101,7 +1102,7 @@ M.setup_fzf_live_flags = function(command, bind_start, opts)
     reload_command = string.format("sleep %.2f; %s", opts.query_delay / 1000, reload_command)
   end
 
-  if opts._is_skim then
+  if utils.has(opts, "sk") then
     opts.prompt = opts.__prompt or opts.prompt or opts.fzf_opts["--prompt"]
     if opts.prompt then
       opts.fzf_opts["--prompt"] = opts.prompt:match("[^%*]+")
@@ -1112,15 +1113,19 @@ M.setup_fzf_live_flags = function(command, bind_start, opts)
       opts.__prompt = opts.prompt
       opts.prompt = nil
     end
-    -- since we surrounded the skim placeholder with quotes
-    -- we need to escape them in the initial query
-    opts.fzf_opts["--cmd-query"] = utils.sk_escape(opts.query)
+    opts.fzf_opts["--cmd-query"] = utils.has(opts, "sk", { 1, 5, 3 }) and opts.query
+        -- NOTE: skim <v1, since we surrounded the skim placeholder
+        -- with quotes we need to escape them in the initial query
+        or utils.sk_escape(opts.query)
     -- '--query' was set by 'resume()', skim has the option to switch back and
     -- forth between interactive command and fuzzy matching (using 'ctrl-q')
     -- setting both '--query' and '--cmd-query' will use <query> to fuzzy match
     -- on top of our result set, double filtering our results (undesirable)
     opts.fzf_opts["--query"] = nil
     opts.query = nil
+    -- flag swap "histoey" <-> "cmd-history"
+    opts.fzf_opts["--cmd-history"] = opts.fzf_opts["--history"]
+    opts.fzf_opts["--history"] = nil
     -- setup as interactive
     table.insert(opts._fzf_cli_args, string.format("--interactive --cmd %s",
       libuv.shellescape(reload_command)))
@@ -1144,12 +1149,15 @@ end
 -- query placeholder for "live" queries
 M.fzf_query_placeholder = "<query>"
 
----@param opts { field_index?: string, _is_skim?: boolean }
+---@param opts { field_index?: string }
 ---@return string
 M.fzf_field_index = function(opts)
   -- fzf already adds single quotes around the placeholder when expanding.
   -- for skim we surround it with double quotes or single quote searches fail
-  return opts and opts.field_index or opts._is_skim and [["{}"]] or "{q}"
+  -- skim >= v1.5.3 already escapes the field index
+  return opts and opts.field_index
+      or utils.has(opts, "sk") and not utils.has(opts, "sk", { 1, 5, 3 }) and [["{}"]]
+      or "{q}"
 end
 
 ---@param cmd string

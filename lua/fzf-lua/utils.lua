@@ -15,6 +15,7 @@ local M = {}
 M.__HAS_NVIM_010 = vim.fn.has("nvim-0.10") == 1
 M.__HAS_NVIM_0102 = vim.fn.has("nvim-0.10.2") == 1
 M.__HAS_NVIM_011 = vim.fn.has("nvim-0.11") == 1
+M.__HAS_NVIM_0116 = vim.fn.has("nvim-0.11.6") == 1
 M.__HAS_NVIM_012 = vim.fn.has("nvim-0.12") == 1
 M.__IS_WINDOWS = vim.fn.has("win32") == 1 or vim.fn.has("win64") == 1
 -- `:help shellslash` (for more info see #1055)
@@ -185,7 +186,7 @@ function M.notify(lvl, ...)
       verbose = false,
       err = M.__HAS_NVIM_011 and lvl == vim.log.levels.ERROR and true or nil,
     }
-    if _G.fzf_jobstart and #vim.api.nvim_list_uis() == 0 then
+    if echo_opts.err and _G.fzf_jobstart and #vim.api.nvim_list_uis() == 0 then
       local output = vim.tbl_map(function(chunk) return chunk[1] end, chunks)
       error(table.concat(output, ""))
     else
@@ -539,6 +540,7 @@ function M.map_set(m, k, v)
     if i == #keys then
       map[key] = v
     else
+      if type(map[key]) == "function" then break end
       map[key] = type(map[key]) == "table" and map[key] or {}
       map = map[key]
     end
@@ -897,7 +899,7 @@ function M.fzf_exit()
   -- in "sync" mode we also need to make sure __CTX is cleared or we'll
   -- have the wrong cursor coordinates (#928)
   M.clear_CTX()
-  require("fzf-lua").win.win_leave()
+  require("fzf-lua").win.close()
 end
 
 ---@return fzf-lua.Win?
@@ -1021,17 +1023,10 @@ end
 ---@param bufnr integer
 ---@return boolean
 function M.is_term_buffer(bufnr)
-  -- convert bufnr=0 to current buf so we can call 'bufwinid'
-  bufnr = bufnr == 0 and vim.api.nvim_get_current_buf() or bufnr
-  local winid = vim.fn.bufwinid(bufnr)
-  if tonumber(winid) > 0 and vim.api.nvim_win_is_valid(winid) then
-    return M.getwininfo(winid) --[[@cast -?]].terminal == 1
-  end
-  local bufname = vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_get_name(bufnr)
-  return M.is_term_bufname(bufname)
+  return vim.api.nvim_buf_is_valid(bufnr) and vim.bo[bufnr].buftype == "terminal"
 end
 
----@param bufnr integer
+---@param bufnr? integer
 ---@param warn? boolean
 ---@param only_if_last_buffer? boolean
 ---@return boolean
@@ -1061,7 +1056,7 @@ function M.save_dialog(bufnr)
     M.warn(string.format("buffer %d has unsaved changes", bufnr))
     return false
   end
-  local res = vim.fn.confirm(string.format([[Save changes to "%s"?]], info.name),
+  local res = M.confirm(string.format([[Save changes to "%s"?]], info.name),
     "&Yes\n&No\n&Cancel")
   if res == 0 or res == 3 then
     -- user cancelled
@@ -1079,18 +1074,14 @@ end
 --   1 for qf list
 --   2 for loc list
 ---@param winid integer
----@param wininfo (vim.fn.getwininfo.ret.item|vim.fn.getwininfo.ret.item[]|false|table)?
 ---@return 1|2|false
-function M.win_is_qf(winid, wininfo)
-  wininfo = wininfo or (vim.api.nvim_win_is_valid(winid) and M.getwininfo(winid))
-  if wininfo and wininfo.quickfix == 1 then
-    return wininfo.loclist == 1 and 2 or 1
-  end
-  return false
+function M.win_is_qf(winid)
+  local winty = vim.api.nvim_win_is_valid(winid) and vim.fn.win_gettype(winid) or nil
+  return winty == "quickfix" and 1 or winty == "loclist" and 2 or false
 end
 
 ---@param bufnr integer
----@param bufinfo (vim.fn.getwininfo.ret.item|vim.fn.getwininfo.ret.item[]|false|table)?
+---@param bufinfo (vim.fn.getbufinfo.ret.item|vim.fn.getbufinfo.ret.item[]|false|table)?
 ---@return 1|2|false
 function M.buf_is_qf(bufnr, bufinfo)
   bufinfo = bufinfo or (vim.api.nvim_buf_is_valid(bufnr) and M.getbufinfo(bufnr))
@@ -1143,27 +1134,19 @@ function M.nvim_buf_get_name(bufnr, bufinfo)
   end
   local bufname = vim.api.nvim_buf_get_name(bufnr)
   if #bufname == 0 then
-    local is_qf = M.buf_is_qf(bufnr, bufinfo)
-    if is_qf then
-      bufname = is_qf == 1 and "[Quickfix List]" or "[Location List]"
+    if vim.bo[bufnr].buftype == "nofile" then
+      bufname = "[Scratch]"
     else
-      bufname = "[No Name]"
+      local is_qf = M.buf_is_qf(bufnr, bufinfo)
+      if is_qf then
+        bufname = is_qf == 1 and "[Quickfix List]" or "[Location List]"
+      else
+        bufname = "[No Name]"
+      end
     end
   end
   assert(#bufname > 0)
   return bufname
-end
-
--- correctly handle virtual text, conceal lines
----@param win integer
----@param buf integer
----@return integer
-function M.line_count(win, buf)
-  if vim.api.nvim_win_text_height then
-    return vim.api.nvim_win_text_height(win, {}).all
-  else
-    return vim.api.nvim_buf_line_count(buf)
-  end
 end
 
 local function _zz()
@@ -1225,7 +1208,7 @@ function M.nvim_open_win(bufnr, enter, config)
 end
 
 function M.nvim_open_win0(bufnr, enter, config)
-  local winid = M.CTX().winid
+  local winid = (M.__CTX() or {}).winid
   if not winid or not vim.api.nvim_win_is_valid(winid) then
     return vim.api.nvim_open_win(bufnr, enter, config)
   end
@@ -1240,6 +1223,9 @@ function M.nvim_win_close(win, opts)
 end
 
 -- Close a buffer without triggering an autocmd
+---@param bufnr integer
+---@param opts vim.api.keyset.buf_delete
+---@return any
 function M.nvim_buf_delete(bufnr, opts)
   return M.eventignore(function()
     if not vim.api.nvim_buf_is_valid(bufnr) then return end
@@ -1249,7 +1235,7 @@ end
 
 ---@param winid integer
 ---@param opts vim.api.keyset.win_config Map defining the window configuration,
-function M.fast_win_set_config(winid, opts)
+function M.win_set_config(winid, opts)
   -- win_set_config can be slow even later with `opts={}`
   -- win->w_config is reused, but style="minimal" always reset win option (slow for bigfile)
   -- https://github.com/neovim/neovim/blob/08c484f2ca4b58e9eda07e194e9d096565db7144/src/nvim/api/win_config.c#L406
@@ -1257,7 +1243,7 @@ function M.fast_win_set_config(winid, opts)
   local old_opts = vim.api.nvim_win_get_config(winid)
   -- nvim_win_get_config don't return style="minimal"
   -- opts.style is mainly for nvim_open_win only (we don't use it here)
-  opts.style = nil
+  opts.style = not M.__HAS_NVIM_010 and "" or nil
   for k, v in pairs(opts) do
     if not vim.deep_equal(old_opts[k], v) then
       vim.api.nvim_win_set_config(winid, opts)
@@ -1285,16 +1271,6 @@ function M.getbufinfo(bufnr)
     return vim.fn["fzf_lua#getbufinfo"](bufnr)
   else
     return vim.fn.getbufinfo(bufnr)[1] or {}
-  end
-end
-
----@param winid? integer
----@return vim.fn.getwininfo.ret.item?
-function M.getwininfo(winid)
-  if M.__HAS_AUTOLOAD_FNS then
-    return vim.fn["fzf_lua#getwininfo"](winid)
-  else
-    return vim.fn.getwininfo(winid)[1]
   end
 end
 
@@ -1349,6 +1325,19 @@ function M.input(prompt, default)
     end
   end
   return ok and res or nil
+end
+
+-- wrapper around |confirm()| to allow cancellation with `<C-c>`
+---@param msg string
+---@param choice? string
+---@param default? integer
+---@param ty? string
+---@return integer
+function M.confirm(msg, choice, default, ty)
+  local ok, res = pcall(vim.fn.confirm, msg, choice, default, ty)
+  if ok and type(res) == "number" then return res end
+  if type(res) == "string" and res:match("Keyboard interrupt") then return 0 end -- <C-c>
+  error(res)
 end
 
 function M.fzf_bind_to_neovim(key)
@@ -1511,7 +1500,8 @@ function M.rpcexec(addr, method, ...)
   ---@cast chan integer
   local ret = { pcall(vim.rpcrequest, chan, method, ...) }
   vim.fn.chanclose(chan)
-  return unpack(ret)
+  local tonil = function(v) if v == vim.NIL then return nil else return v end end
+  return unpack(vim.tbl_map(tonil, ret))
 end
 
 --- Checks if treesitter parser for language is installed
@@ -1631,6 +1621,9 @@ function M.lsp_get_clients(opts)
   end, clients)
 end
 
+---@param key string
+---@param opts table
+---@return fzf-lua.PidObject
 function M.pid_object(key, opts)
   local Pid = {}
 
@@ -1650,24 +1643,24 @@ function M.pid_object(key, opts)
 end
 
 -- modified version of vim.wo
--- 1. always setlocal (to avoid potential pollute on win split)
--- 2. nop on non-exist option
--- 3. nop if unchange (set win option can be slow #2018)
-local function new_win_opt_accessor(winid)
+-- 1. no error on non-exist option
+-- 2. nop if unchange (set win option can be slow #2018)
+local function new_win_opt_accessor(winid, bufnr)
   return setmetatable({}, {
     __index = function(_, k)
-      if type(k) == "number" then return new_win_opt_accessor(k) end
+      if bufnr == nil and type(k) == "number" then
+        if winid == nil then return new_win_opt_accessor(k) end
+        return new_win_opt_accessor(winid, k)
+      end
       if vim.fn.exists("+" .. k) == 0 then return end
-      return vim.api.nvim_get_option_value(k, { scope = "local", win = winid or 0 })
+      return vim.api.nvim_get_option_value(k, { scope = bufnr and "local" or nil, win = winid or 0 })
     end,
     __newindex = function(_, k, v)
-      if vim.fn.exists("+" .. k) == 0
-          or vim.api.nvim_get_option_value(k, { scope = "local", win = winid or 0 }) == v then
-        return
-      end
-      vim.wo[winid or 0][k] = v
+      if vim.fn.exists("+" .. k) == 0 then return end
       -- TODO: causes issues with highlights
-      -- vim.api.nvim_set_option_value(k, v, { scope = "local", win = winid or 0 })
+      local scope = bufnr and "local" or nil
+      if vim.api.nvim_get_option_value(k, { scope = scope, win = winid or 0 }) == v then return end
+      vim.api.nvim_set_option_value(k, v, { scope = scope, win = winid or 0 })
     end,
   })
 end

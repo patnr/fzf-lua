@@ -106,7 +106,7 @@ T["files"]["icons"]["defaults"] = new_set({ parametrize = { { "+attrs" }, { "-at
     ---@diagnostic disable-next-line: param-type-mismatch
     local path = vim.fs.joinpath(vim.fn.stdpath("data"), "lazy", plugin)
     if not vim.uv.fs_stat(path) then
-      path = vim.fs.joinpath("deps", plugin)
+      path = vim.fs.abspath(vim.fs.joinpath("deps", plugin))
     end
     exec_lua("vim.opt.runtimepath:append(...)", { path })
     exec_lua(([[require("%s").setup({})]]):format(icons == "mini" and "mini.icons" or plugin))
@@ -141,7 +141,7 @@ T["files"]["executable"] = new_set({ parametrize = { { "fd" }, { "rg" }, { "find
       exclude = [[{ "fd", "fdfind", "rg" }]]
       opts = {
         find_opts =
-        [[-type f \! -path '*/.git/*' \! -path '*/doc/tags' \! -path '*/deps/*' ! -path '*/tests/*'| sort]],
+        [[-type f ! -path '*/.git/*' ! -path '*/doc/tags' ! -path '*/deps/*' ! -path '*/tests/*'| sort]],
         dir_opts =
         [[/s/b/a:-d | findstr -v "\.git\\" | findstr -v "doc\\tags" | findstr -v "deps" | findstr -v "tests" | sort]],
         strip_cwd_prefix = true
@@ -203,7 +203,7 @@ T["files"]["nop on nothing match"] = function()
 end
 
 T["files"]["line_query"] = function()
-  helpers.FzfLua.files(child, {
+  local opts = {
     __expect_lines = true,
     __abort_key = "<c-t>",
     cmd = "rg --files LICENSE",
@@ -213,8 +213,15 @@ T["files"]["line_query"] = function()
     line_query = true,
     query = "lic es :21",
     __after_open = function() if helpers.IS_WIN() then sleep(250) end end
-  })
+  }
+  helpers.FzfLua.files(child, opts)
   -- child.wait_until(function() return exec_lua([[return _G._fzf_lua_on_create]]) == vim.NIL end)
+  eq({ "LICENSE", 21 }, { vim.fs.basename(child.fn.bufname()), child.fn.line(".") })
+
+  child.cmd([[bwipe]])
+  eq({ "", 1 }, { vim.fs.basename(child.fn.bufname()), child.fn.line(".") })
+
+  helpers.FzfLua.global(child, opts)
   eq({ "LICENSE", 21 }, { vim.fs.basename(child.fn.bufname()), child.fn.line(".") })
 end
 

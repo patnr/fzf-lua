@@ -21,6 +21,13 @@ M.grep = function(opts)
   -- we need this for `actions.grep_lgrep`
   opts.__ACT_TO = opts.__ACT_TO or M.live_grep
 
+  -- regex as alias to search+no_esc
+  if opts.regex then
+    opts.search = opts.regex
+    opts.no_esc = true
+    opts.regex = nil
+  end
+
   if not opts.search and not opts.raw_cmd then
     -- resume implies no input prompt
     if opts.resume then
@@ -39,7 +46,9 @@ M.grep = function(opts)
     end
   end
 
-  if utils.has(opts, "fzf") and not opts.prompt and opts.search and #opts.search > 0 then
+  if (utils.has(opts, "fzf") or utils.has(opts, "sk", { 1, 8, 1 }))
+      and not opts.prompt and opts.search and #opts.search > 0
+  then
     opts.prompt = utils.ansi_from_hl(opts.hls.live_prompt, opts.search) .. " > "
   end
 
@@ -60,13 +69,20 @@ M.grep = function(opts)
 end
 
 local function normalize_live_grep_opts(opts)
-  -- disable treesitter as it collides with cmd regex highlighting
-  opts = opts or {}
-  opts._treesitter = false
-
   ---@type fzf-lua.config.Grep
   opts = config.normalize_opts(opts, "grep")
   if not opts then return end
+
+  -- regex as alias to search+no_esc
+  if opts.regex then
+    opts.search = opts.regex
+    opts.no_esc = true
+    opts.regex = nil
+  end
+
+  -- auto disable treesitter as it collides with cmd regex highlighting
+  -- ignore if forced with `_treesitter = true` (#2511)
+  if opts._treesitter == 1 then opts = utils.map_set(opts, "winopts.treesitter", false) end
 
   -- we need this for `actions.grep_lgrep`
   opts.__ACT_TO = opts.__ACT_TO or M.grep

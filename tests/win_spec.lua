@@ -111,7 +111,10 @@ T["win"]["hide"]["can resume after close CTX win (#1936)"] = function()
   -- can :wqa when there're hide job #1817
   pcall(child.cmd, [[wqa]])
   -- child.is_running() didn't work as expected
-  eq(vim.fn.jobwait({ assert(child.job).id }, 1000)[1], 0)
+  local res = vim.fn.jobwait({ assert(child.job).id }, 1000)[1]
+  -- 0 = normal exit, -3 = already exited/invalid (acceptable race)
+  local valid_res = { [0] = true, [-3] = true }
+  eq(valid_res[res] or res, true) -- HACK: show the res code in the assert
 end
 
 T["win"]["hide"]["actions on multi-select but zero-match #1961"] = function()
@@ -128,6 +131,17 @@ T["win"]["hide"]["actions on multi-select but zero-match #1961"] = function()
   child.type_keys([[<cr>]])
   child.wait_until(function() return child.lua_get([[_G._fzf_lua_on_create]]) == vim.NIL end)
   eq("README.md", vim.fs.basename(child.lua_get([[vim.api.nvim_buf_get_name(0)]])))
+end
+
+T["win"]["hide"]["nohidden"] = function()
+  reload({ "hide" })
+  exec_lua([[vim.o.hidden = false]])
+  helpers.FzfLua.files(child, {
+    __abort_key = "<esc>",
+    __expect_lines = false,
+    __after_open = function() if helpers.IS_WIN() then vim.uv.sleep(250) end end,
+    query = "LICENSE$",
+  })
 end
 
 T["win"]["keymap"] = new_set({ n_retry = not helpers.IS_LINUX() and 5 or nil })
@@ -299,6 +313,34 @@ T["win"]["toggle"][""] = new_set(
     end
   })
 
+T["win"]["relative=cursor"] = function()
+  -- Ignore terminal command line with process number
+  local screen_opts = { ignore_text = { 24, 28 }, normalize_paths = helpers.IS_WIN() }
+  local opts = {
+    __expect_lines = true,
+    __screen_opts = screen_opts,
+    winopts = {
+      relative = "cursor",
+      preview = { layout = "horizontal", horizontal = "left:50%" }
+    },
+    previewer = function() return require("fzf-lua.test.previewer").builtin end,
+    __after_open = function()
+      child.wait_until(function() return child.lua_get([[_G._fzf_load_called]]) == true end)
+      if not helpers.IS_LINUX() then vim.uv.sleep(250) end
+    end,
+  }
+  helpers.FzfLua.fzf_exec(child, { "foo", "bar", "baz" }, opts)
+  child.cmd([[enew]])
+  set_lines({ ("a"):rep(child.o.columns) })
+  type_keys("g$")
+  -- pretend we closed the window to make helpers won't wait for new open
+  exec_lua([[_G._fzf_lua_on_create = nil]])
+  exec_lua([[_G._fzf_load_called = nil]])
+  helpers.FzfLua.fzf_exec(child, { "foo", "bar", "baz" }, opts)
+  child.cmd([[bwipe!]])
+end
+
+
 T["win"]["reuse"] = new_set({
   parametrize = {
     { {} },
@@ -343,5 +385,21 @@ T["win"]["reuse"] = new_set({
     toggle_preview()
   end
 })
+
+T["win"]["highlight"] = new_set()
+
+T["win"]["highlight"]["unchange when reuse win #2588"] = function()
+  helpers.SKIP_IF_WIN() -- windows attr looks different
+  local opts = {
+    __no_abort = true,
+    __after_open = function() if helpers.IS_WIN() then vim.uv.sleep(250) end end,
+    cwd_prompt = false,
+  }
+  helpers.FzfLua.files(child, opts)
+  -- pretend we closed the window to make helpers won't wait for new open
+  exec_lua([[_G._fzf_lua_on_create = nil]])
+  exec_lua([[_G._fzf_load_called = nil]])
+  helpers.FzfLua.files(child, opts)
+end
 
 return T

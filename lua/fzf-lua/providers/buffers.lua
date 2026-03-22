@@ -113,6 +113,15 @@ local get_unixtime = function(buf)
   end
 end
 
+--- @return integer[] # Sorted list of buffer ids
+M.list_bufs_sorted = function()
+  local bufs = vim.api.nvim_list_bufs()
+  table.sort(bufs, function(a, b)
+    return get_unixtime(getbuf(a)) > get_unixtime(getbuf(b))
+  end)
+  return bufs
+end
+
 ---@param opts fzf-lua.config.BufferLines|{}
 ---@param bufnrs integer[]
 ---@param winid integer?
@@ -120,6 +129,8 @@ end
 local populate_buffer_entries = function(opts, bufnrs, winid)
   ---@type table[]
   local buffers = {}
+  -- Filter invalid buffers (#2519)
+  bufnrs = vim.tbl_filter(function(b) return vim.api.nvim_buf_is_valid(b) end, bufnrs)
   for _, bufnr in ipairs(bufnrs) do
     local buf = getbuf(bufnr)
 
@@ -131,8 +142,8 @@ local populate_buffer_entries = function(opts, bufnrs, winid)
 
     -- Use vim.b.term_title where possible (#2456)
     if utils.is_term_bufname(buf.info.name) then
-      local term_title = vim.b[bufnr].term_title
-      if term_title ~= buf.info.name then
+      local term_title = vim.b[bufnr].term_title ---@type string?
+      if term_title and term_title ~= buf.info.name then
         buf.info.name = "term://" .. term_title:gsub("^term://", "")
       end
     end
@@ -364,7 +375,7 @@ M.buffer_lines = function(opts)
     end)()
   end
 
-  opts = core.set_fzf_field_index(opts, "{3}", opts._is_skim and "{}" or "{..-2}")
+  opts = core.set_fzf_field_index(opts, "{3}", utils.has(opts, "sk") and "{}" or "{..-2}")
   return core.fzf_exec(contents, opts)
 end
 
@@ -581,10 +592,10 @@ M.treesitter = function(opts)
       for _, definition in ipairs(get(bufnr0)) do
         local nodes = get_local_nodes(definition)
         for _, node in ipairs(nodes) do
-          if node.node then
+          node.kind = node.kind and node.kind:gsub(".*%.", "")
+          if node.node and (not opts.node_filter or opts.node_filter(node, node.kind)) then
             vim.schedule(function()
               -- Remove node prefix, e.g. `locals.definition.var`
-              node.kind = node.kind and node.kind:gsub(".*%.", "")
               local lnum, col, _, _ = ts.get_node_range(node.node)
               local node_text = ts.get_node_text(node.node, bufnr0)
               local node_kind = node.kind and utils.ansi_from_hl(kind2hl(node.kind), node.kind)

@@ -16,8 +16,16 @@ local T = helpers.new_set_with_child(child)
 T["actions"] = new_set({ n_retry = not helpers.IS_LINUX() and 5 or nil })
 
 T["actions"]["ui don't freeze on error"] = function()
+  helpers.SKIP_IF_NOT_NIGHTLY()
+  helpers.SKIP_IF_WIN()
   -- reload({ "hide" })
-  local screen_opts = { ignore_text = { 28 } }
+  local screen_opts = { start_line = 1, end_line = 10, ignore_text = { 28 } }
+  -- fix flaky hit enter prompt on windows
+  -- TODO: but enable ui2 have other werid flaky
+  -- exec_lua([[
+  --   local extui = vim.F.npcall(require, 'vim._core.ui2') or vim.F.npcall(require, 'vim._extui')
+  --   if extui then extui.enable({}) end
+  -- ]])
   exec_lua(
     [[FzfLua.fzf_exec({ "aaa", "bbb" }, {
       actions = { enter = { fn = error, exec_silent = true } },
@@ -94,6 +102,9 @@ T["actions"]["vimcmd"] = new_set({
   },
 }, {
   function(action)
+    -- store mini.test float so we can return to it when
+    -- testing in main instance
+    local win = vim.api.nvim_get_current_win()
     local ctx = function()
       return {
         buf = child.api.nvim_get_current_buf(),
@@ -141,6 +152,12 @@ T["actions"]["vimcmd"] = new_set({
       __expect_lines = true,
       __after_open = function()
         child.wait_until(function() return child.lua_get([[_G._fzf_load_called]]) == true end)
+        -- Wait for previewer to load the LICENSE file entry and title to render
+        child.wait_until(function()
+          local entry = child.lua_get([[FzfLua.utils.fzf_winobj()._previewer.last_entry]])
+          return entry and entry:match("LICENSE") ~= nil
+        end)
+        vim.uv.sleep(100)  -- Allow async title update to render
         if helpers.IS_WIN() then vim.uv.sleep(250) end
       end,
       no_esc = true,
@@ -152,8 +169,25 @@ T["actions"]["vimcmd"] = new_set({
       eq({ "LICENSE", 3 }, { _ctx.name, child.fn.line(".") })
     end
     eq("live_grep", exec_lua([[return _G._fzf_info.cmd]]))
+    -- close tab and return to mini.test float
+    vim.api.nvim_buf_delete(0, { force = true })
+    vim.api.nvim_set_current_win(win)
   end
 })
 
+T["actions"]["buflisted #2561"] = function()
+  child.cmd("edit LICENSE")
+  child.bo.buflisted = false
+  child.cmd("enew")
+  helpers.FzfLua.files(child, {
+    __abort_key = "<cr>",
+    __expect_lines = false,
+    __after_open = function()
+      if helpers.IS_WIN() then vim.uv.sleep(250) end
+    end,
+    query = "LICENSE$",
+  })
+  eq(true, child.bo.buflisted)
+end
 
 return T

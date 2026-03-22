@@ -70,6 +70,11 @@ local function git_preview(opts, file)
   if file then
     opts.preview = opts.preview:gsub("[<{]file[}>]", file)
   end
+  -- Normalize the cwd passed to git_preview() so that it is the closest
+  -- directory up the path that is a Git repo. git_diff() passes file
+  -- paths relative to the Git repo root so to ensure the previewer
+  -- can interpret the paths correctly, it must use the repo root as cwd.
+  opts.cwd = path.git_root(opts)
   opts.preview = path.git_cwd(opts.preview, opts)
   if type(opts.preview_pager) == "function" then
     opts.preview_pager = opts.preview_pager()
@@ -86,23 +91,87 @@ local function git_preview(opts, file)
   return opts.preview
 end
 
+---@param opts fzf-lua.config.GitBase|{}?
+---@param ref string
+---@return boolean
+local git_validate_ref = function(opts, ref)
+  local cmd = path.git_cwd({ "git", "rev-parse", "--verify", ref }, opts --[[@as table]])
+  local _, exit_code = utils.io_systemlist(cmd --[[@as string[] ]])
+  if exit_code ~= 0 then
+    utils.warn("Invalid git ref %s", ref)
+    return false
+  end
+  return true
+end
+
+---@param opts fzf-lua.config.GitDiff|fzf-lua.config.GitHunks
+---@return table?
+local normalize_diff_opts = function(opts)
+  -- Backward compat `compare_against` -> `ref1`
+  ---@diagnostic disable-next-line: undefined-field
+  opts.ref1 = opts.compare_against or opts.ref1
+  -- Convinience: ref as string array
+  if type(opts.ref) == "table" then
+    opts.ref, opts.ref1 = opts.ref[1], (opts.ref[2] or opts.ref1)
+  end
+  -- Ensure supplied refs are valid in this git repository.
+  for _, r in ipairs({ "ref", "ref1" }) do
+    if type(opts[r]) == "string" and #opts[r] > 0 and not git_validate_ref(opts, opts[r]) then
+      return
+    end
+  end
+  -- If no ref was supplied default to last commit, otherwise compare against the index
+  if not opts.ref and not opts.ref1 then
+    local cmd = path.git_cwd(
+      { "git", "-c", "color.status=false", "--no-optional-locks", "status", "--porcelain=v1" },
+      opts --[[@as table]])
+    local out, exit_code = utils.io_systemlist(cmd --[[@as string[] ]])
+    if exit_code == 0 and #out == 0 then
+      opts.ref = "HEAD^"
+    else
+      opts.ref = "HEAD"
+    end
+  end
+  opts.cmd = opts.cmd:gsub("[<{]ref[}>]", opts.ref or "")
+  opts.cmd = opts.cmd:gsub("[<{]ref1[}>]", opts.ref1 or "")
+  opts.cmd = opts.cmd:gsub("[<{]file[}>]", opts.file and libuv.shellescape(opts.file) or "")
+  if type(opts.preview) == "string" then
+    opts.preview = opts.preview:gsub("[<{]ref[}>]", opts.ref or "")
+    opts.preview = opts.preview:gsub("[<{]ref1[}>]", opts.ref1 or "")
+    opts.preview = git_preview(opts, "{-1}")
+  end
+  if type(opts._headers) == "table" then
+    table.insert(opts._headers, "ref")
+    table.insert(opts._headers, "ref1")
+  end
+  return set_git_cwd_args(opts)
+end
+
 ---@param opts fzf-lua.config.GitDiff|{}?
 ---@return thread?, string?, table?
 M.diff = function(opts)
   ---@type fzf-lua.config.GitDiff
   opts = config.normalize_opts(opts, "git.diff")
   if not opts then return end
-  local cmd = path.git_cwd({ "git", "rev-parse", "--verify", opts.ref }, opts)
-  local _, err = utils.io_systemlist(cmd)
-  if err ~= 0 then
-    utils.warn("Invalid git ref %s", opts.ref)
-    return
-  end
-  opts.cmd = opts.cmd:gsub("[<{]ref[}>]", opts.ref)
-  opts.preview = opts.preview:gsub("[<{]ref[}>]", opts.ref)
-  opts = set_git_cwd_args(opts)
-  if not opts.cwd then return end
-  opts.preview = git_preview(opts, "{-1}")
+  opts = normalize_diff_opts(opts)
+  if not opts or not opts.cwd then return end
+  return core.fzf_exec(opts.cmd, opts)
+end
+
+
+---@param opts fzf-lua.config.GitHunks|{}?
+---@return thread?, string?, table?
+M.hunks = function(opts)
+  ---@type fzf-lua.config.GitHunks
+  opts = config.normalize_opts(opts, "git.hunks")
+  if not opts then return end
+  opts = normalize_diff_opts(opts)
+  if not opts or not opts.cwd then return end
+
+  -- we don't need git icons since we get them
+  -- as part of our `git status -s`
+  opts.git_icons = false
+
   return core.fzf_exec(opts.cmd, opts)
 end
 
@@ -270,32 +339,6 @@ M.stash = function(opts)
     end
     return (not stash or not rest) and x or stash .. rest
   end
-
-  return core.fzf_exec(opts.cmd, opts)
-end
-
----@param opts fzf-lua.config.GitHunks|{}?
----@return thread?, string?, table?
-M.hunks = function(opts)
-  ---@type fzf-lua.config.GitHunks
-  opts = config.normalize_opts(opts, "git.hunks")
-  if not opts then return end
-  local cmd = path.git_cwd({ "git", "rev-parse", "--verify", opts.ref }, opts)
-  local _, err = utils.io_systemlist(cmd)
-  if err ~= 0 then
-    utils.warn("Invalid git ref %s", opts.ref)
-    return
-  end
-  opts.cmd = opts.cmd:gsub("[<{]ref[}>]", opts.ref)
-  opts = set_git_cwd_args(opts)
-  if not opts.cwd then return end
-
-  -- we don't need git icons since we get them
-  -- as part of our `git status -s`
-  opts.git_icons = false
-
-  opts.header_prefix = opts.header_prefix or "+ -  "
-  opts.header_separator = opts.header_separator or "|"
 
   return core.fzf_exec(opts.cmd, opts)
 end

@@ -3,8 +3,6 @@
 -- does not close the pipe before all writes are complete
 -- option to not add '\n' on content function callbacks
 -- https://github.com/vijaymarupudi/nvim-fzf/blob/master/lua/fzf.lua
----@diagnostic disable-next-line: deprecated
-local uv = vim.uv or vim.loop
 
 local utils = require "fzf-lua.utils"
 local libuv = require "fzf-lua.libuv"
@@ -64,6 +62,8 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
   table.insert(cmd, libuv.shellescape(outputtmpname))
 
   if not opts.is_fzf_tmux then
+    utils.eventignore(function() vim.bo.filetype = "fzf" end)
+
     -- A pesky bug I fixed upstream and was merged in 0.11/0.10.2:
     -- <C-c> in term buffers was making neovim freeze, as a workaround in older
     -- versions (not perfect could still hang) we map <C-c> to <Esc> locally
@@ -185,7 +185,11 @@ function M.raw_fzf(contents, fzf_cli_args, opts)
     if fzfwin then fzfwin:update_statusline() end
 
     -- See note in "ModeChanged" above
-    if vim.api.nvim_get_mode().mode == "t" then
+    -- NOTE: feedkeys hack not required since
+    -- https://github.com/neovim/neovim/commit/3621af9b970c80d2a6ff36569d7495391599c334
+    if not (utils.__HAS_NVIM_012 or utils.__HAS_NVIM_0116)
+        and vim.api.nvim_get_mode().mode == "t"
+    then
       -- Called from another fzf-win most likely
       utils.feed_keys_termcodes("i")
     else

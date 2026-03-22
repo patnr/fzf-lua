@@ -1,3 +1,7 @@
+local NVIM_BIN = os.getenv("FZF_LUA_NVIM_BIN") or vim.v.progpath
+local NVIM_RUNTIME = os.getenv("FZF_LUA_NVIM_RUNTIME") or os.getenv("VIMRUNTIME")
+if NVIM_RUNTIME then vim.env.VIMRUNTIME = NVIM_RUNTIME end
+
 ---@diagnostic disable-next-line: deprecated
 local api, uv, fn = vim.api, vim.uv or vim.loop, vim.fn
 ---@module 'ffi'?
@@ -12,9 +16,11 @@ pcall(function()
       unsigned short ws_ypixel;
     };
     int ioctl(int fd, unsigned long request, ...);
+    int fcntl(int fd, int cmd, ...);
     int execl(const char *, const char *, ...);
-    int close(int fd);
-    int openpty(int *amaster, int *aslave, char *name, void *termp, const struct winsize *winp);
+    int fork(void);
+    int isatty(int fd);
+    int fileno(void *stream);
   ]]
 end)
 
@@ -23,20 +29,43 @@ local function quit() vim.cmd.quit() end
 local function parse_entries(s, o)
   return vim.tbl_map(function(e)
     e = FzfLua.path.entry_to_file(e --[[@as string]], o)
-    e.path = FzfLua.path.relative_to(assert(e.path), vim.uv.cwd())
+    e.path = FzfLua.path.relative_to(assert(e.path), FzfLua.utils.cwd())
     return e
   end, s)
+end
+
+local function isatty(file)
+  if not ffi then return false end
+  local fd = ffi.C.fileno(file)
+  return ffi.C.isatty(fd) ~= 0
+end
+
+local function fork(cmd, ...)
+  if not ffi then return false end
+  local pid = ffi.C.fork()
+  if pid < 0 then return end -- fork failed
+  if pid > 0 then return end -- parent process, do nothing
+  -- pid == 0, child process, build the shell command
+  -- tiny delay to let parent (fzf-lua) exit
+  -- then exec nvim conneced to /dev/tty
+  local shell_cmd = string.format(
+    "sleep 0.05; %s %s </dev/tty >/dev/tty 2>/dev/tty", cmd,
+    table.concat(vim.tbl_map(function(x) return FzfLua.libuv.shellescape(x) end, { ... }), " ")
+  )
+  os.execute(shell_cmd)
+  os.exit(0)
 end
 
 local function posix_exec(cmd, ...)
   local _is_win = fn.has("win32") == 1 or fn.has("win64") == 1
   if type(cmd) ~= "string" or _is_win or not ffi then return end
+  if not isatty(io.stdout) then return fork(cmd, ...) end
   local args = { ... }
   -- NOTE: must add NULL to mark end of the vararg
   table.insert(args, string.byte("\0"))
   ffi.C.execl(cmd, cmd, unpack(args))
   -- if `execl` succeeds we should never get here
-  assert(false, string.format([[execl("%s",...) failed with error %d]], cmd, ffi.errno()))
+  error(string.format([[execl("%s",...) failed with error %d]], cmd, ffi.errno()))
 end
 
 _G.fzf_tty_get_width = function()
@@ -49,61 +78,20 @@ _G.fzf_tty_get_width = function()
   if ret == 0 then return ws[0].ws_col end
 end
 
-_G.fzf_pty_spawn = function(cmd, opts)
-  local function openpty(rows, cols)
-    ---@diagnostic disable: assign-type-mismatch
-    -- Lua doesn't have out-args so we create short arrays of numbers.
-    local amaster = ffi.new("int[1]") ---@type [integer]
-    local aslave = ffi.new("int[1]") ---@type [integer]
-    ---@type { ws_row: integer, ws_col: integer }
-    local winp = ffi.new("struct winsize")
-    winp.ws_row = rows
-    winp.ws_col = cols
-    ffi.C.openpty(amaster, aslave, nil, nil, winp)
-    -- And later extract the single value that was placed in the array.
-    return amaster[0], aslave[0]
+-- https://github.com/libuv/libuv/blob/04fc1580d48c1f7aa339b6ccf91f1f815bc08b45/src/unix/core.c#L800
+local enable_stdio_inheritance = function()
+  local function clear_cloexec(fd)
+    local F_SETFD = 2
+    local EINTR = 4
+    local res
+    repeat
+      res = ffi.C.fcntl(fd, F_SETFD, 1)
+    until not (res == -1 and ffi.errno() == EINTR)
+    return res ~= -1
   end
-  ---@type integer, integer
-  local master, slave = openpty(opts.height, opts.width) -- workaround with resizing
-  local pipe
-  opts.env = opts.env or {}
-  opts.env.NVIM = ""
-  local handle, pid = FzfLua.libuv.uv_spawn(
-    cmd[1],
-    ---@diagnostic disable-next-line: missing-fields
-    {
-      args = vim.list_slice(cmd, 2),
-      cwd = opts.cwd,
-      stdio = { slave, slave, slave },
-      env = opts.env,
-    },
-    function(_)
-    end
-  )
-
-  pipe = assert(vim.uv.new_pipe(false))
-  pipe:open(master)
-  ffi.C.close(slave)
-
-  local closing = false
-  local kill = FzfLua.libuv.process_kill
-  pipe:read_start(function(_)
-    if closing then return end
-    closing = true
-    opts.on_stdout()
-    vim.defer_fn(function()
-      ffi.C.close(master)
-      local pids = api.nvim_get_proc_children(pid)
-      table.insert(pids, 1, pid)
-      if not handle:is_closing() then
-        vim.tbl_map(function(p) kill(p, uv.constants.SIGTERM) end, pids)
-        vim.defer_fn(
-          function() vim.tbl_map(function(p) kill(p, uv.constants.SIGKILL) end, pids) end, 100)
-      end
-    end, 20)
-    pipe:read_stop()
-  end)
-  return pid
+  for i = 0, 15 do
+    if not clear_cloexec(i) then break end
+  end
 end
 
 local HAS_TMUX = os.getenv("TMUX")
@@ -138,16 +126,27 @@ return {
       ["ctrl-q"] = function(s, o)
         local entries = parse_entries(s, o)
         if ffi and #entries == 1 then
-          posix_exec(fn.exepath("nvim"), entries[1].path,
-            entries[1].line and ("+" .. entries[1].line) or nil,
-            entries[1].col and ("+norm! %s|"):format(entries[1].col) or nil)
+          local lnum = entries[1].line > 0 and entries[1].line or nil
+          local col = entries[1].col > 0 and entries[1].col or nil
+          posix_exec(NVIM_BIN, entries[1].path,
+            lnum and ("+" .. entries[1].line) or nil,
+            col and ("+norm! %s|"):format(col) or nil)
         elseif ffi and #entries > 1 then
-          local file = fn.tempname()
-          fn.writefile(vim.tbl_map(function(e) -- Format: {filename}:{lnum}:{col}: {text}
+          local qf_items = {}
+          for _, e in ipairs(entries) do
             local text = e.stripped:match(":%d+:%d?%d?%d?%d?:?(.*)$") or ""
-            return ("%s:%d:%d: %s"):format(e.path, e.line or 1, e.col or 1, text)
-          end, entries), file)
-          posix_exec(fn.exepath("nvim"), "-q", file)
+            table.insert(qf_items, {
+              filename = e.path,
+              lnum = e.line or 0,
+              col = e.col or 0,
+              valid = 1,
+              text = text,
+            })
+          end
+          local qf_str = vim.inspect(qf_items):gsub("\n%s*", " ")
+          posix_exec(NVIM_BIN, "-c", string.format(
+            "lua vim.o.hidden=false; vim.fn.setqflist(%s); vim.cmd('cfirst | set hidden&')",
+            qf_str))
         end
         quit()
       end,
@@ -164,11 +163,21 @@ return {
     }
   },
   serverlist = {
+    previewer = { _ctor = require("fzf-lua.previewer").fzf.nvim_server },
     actions = {
       ["enter"] = function(s)
         assert(s[1])
         local remote = s[1]:match("%((.-)%)")
-        posix_exec(fn.exepath("nvim"), "--remote-ui", "--server", remote)
+        for _, chan in ipairs(api.nvim_list_chans()) do
+          if chan.stream ~= "stderr" then
+            fn.chanclose(chan.id)
+          end
+        end
+        for _, pid in ipairs(api.nvim_get_proc_children(fn.getpid())) do
+          vim.uv.kill(pid, vim.uv.constants.SIGTERM)
+        end
+        enable_stdio_inheritance()
+        posix_exec(NVIM_BIN, "--remote-ui", "--server", remote)
       end
     }
   }

@@ -127,22 +127,28 @@ end
 function M.pipe_wrap_fn(fn, fzf_field_index, debug)
   fzf_field_index = fzf_field_index or "{+}"
 
-  local receiving_function = function(pipe_path, ...)
+  ---@param ctx fzf-lua.rpc.Ctx
+  local receiving_function = function(ctx)
     local pipe = assert(uv.new_pipe(false))
-    local args = { ... }
+    local pipe_path = ctx.pipe_path
     -- unescape double backslashes on windows
-    if utils.__IS_WINDOWS and type(args[1]) == "table" then
-      args[1] = vim.tbl_map(function(x)
+    if utils.__IS_WINDOWS and type(ctx.selection) == "table" then
+      ctx.selection = vim.tbl_map(function(x)
         return libuv.unescape_fzf(x, vim.g.fzf_lua_fzf_version)
-      end, args[1])
+      end, ctx.selection)
     end
-    utils.get_info().selected = args[1] and args[1][1] or nil
+    -- for skim compatibility
+    local preview_lines = tonumber(ctx.env.FZF_PREVIEW_LINES or ctx.env.LINES)
+    local preview_cols = tonumber(ctx.env.FZF_PREVIEW_COLUMNS or ctx.env.COLUMNS)
+    utils.get_info().selected = (ctx.selection or {})[1]
     uv.pipe_connect(pipe, pipe_path, function(err)
       if err then
-        error(string.format("pipe_connect(%s) failed with error: %s", pipe_path, err))
+        ---@diagnostic disable-next-line: undefined-field
+        err = uv.translate_sys_error(uv.errno[err])
+        utils.warn(string.format("pipe_connect(%s) failed with error: %s", pipe_path, err))
       else
         vim.schedule(function()
-          fn(pipe, unpack(args))
+          fn(pipe, ctx.selection, preview_lines, preview_cols, ctx)
         end)
       end
     end)
@@ -180,7 +186,7 @@ M.check_upvalue = function(v, varname)
   local ok, err = pcall(f) ---@cast err string
   assert(
     ok or (not err:match("attempt to index upvalue") and not err:match("attempt to call upvalue")),
-    string.format("multiprocess '%s' cannot have upvalue referecnces", varname))
+    string.format("multiprocess '%s' cannot have upvalue references", varname))
   return str
 end
 
@@ -293,15 +299,15 @@ M.stringify = function(contents, opts, fzf_field_index)
   end
 
   local cmd, id = M.pipe_wrap_fn(function(pipe, ...)
-    local args = { ... }
+    local args, n = { ... }, select("#", ...)
     -- Contents could be dependent or args, e.g. live_grep which
     -- generates a different command based on the typed query
     -- redefine local contents to prevent override on function call
     ---@type fzf-lua.content, table?
     ---@diagnostic disable-next-line: redefined-local, assign-type-mismatch
     local contents, env = (function()
-      local ret = opts.is_live and type(contents) == "function" and contents(unpack(args), opts)
-          or opts.__stringify_cmd and contents(unpack(args))
+      local ret = (opts.is_live and type(contents) == "function" and contents(unpack(args), opts))
+          or (opts.__stringify_cmd and type(contents) == "function" and contents(unpack(args, 1, n)))
           or contents
       if opts.__stringify_cmd and type(ret) == "table" then
         return ret.cmd, (ret.env or opts.env)
@@ -426,7 +432,7 @@ M.stringify = function(contents, opts, fzf_field_index)
           vim.tbl_map(function(x) on_write_nl(x) end, contents)
           on_finish()
         elseif type(contents) == "function" then
-          contents(on_write_nl, on_write, unpack(args))
+          contents(on_write_nl, on_write, unpack(args, 1, n))
         end
       end, debug.traceback)
       if not ok and err then
@@ -440,9 +446,9 @@ M.stringify = function(contents, opts, fzf_field_index)
 end
 
 ---@alias fzf-lua.shell.cmdSpec string|{ cmd: string|string[], env: table? }?
----@alias fzf-lua.shell.cmd fun(items: string[], fzf_lines: integer, fzf_columns: integer): fzf-lua.shell.cmdSpec
----@alias fzf-lua.shell.data fun(items: string[], fzf_lines: integer, fzf_columns: integer): fzf-lua.content?
----@alias fzf-lua.shell.data2 fun(items: string[], opts: fzf-lua.config.Resolved|{}): fzf-lua.content?
+---@alias fzf-lua.shell.cmd fun(items: string[], fzf_lines: integer, fzf_columns: integer, ctx?: fzf-lua.rpc.Ctx): fzf-lua.shell.cmdSpec
+---@alias fzf-lua.shell.data fun(items: string[], fzf_lines: integer, fzf_columns: integer, ctx?: fzf-lua.rpc.Ctx): fzf-lua.content?
+---@alias fzf-lua.shell.data2 fun(items: string[], opts: fzf-lua.config.Resolved|{}, ctx?: fzf-lua.rpc.Ctx): fzf-lua.content?
 
 ---@param fn fzf-lua.shell.cmd
 ---@param opts table
@@ -522,6 +528,14 @@ end
 M.wrap_spawn_stdio = function(opts)
   local is_win = utils.__IS_WINDOWS
   local nvim_bin = os.getenv("FZF_LUA_NVIM_BIN") or vim.v.progpath
+  local nvim_runtime = (function()
+    local rt = os.getenv("FZF_LUA_NVIM_RUNTIME")
+    if not rt then return "" end
+    return string.format(
+      is_win and [[set VIMRUNTIME=%s& ]] or "VIMRUNTIME=%s ",
+      is_win and vim.fs.normalize(rt) or libuv.shellescape(rt)
+    )
+  end)()
   -- TODO: should we check "cmd"?
   for _, k in ipairs({ "contents", "fn_transform", "fn_preprocess", "fn_postprocess" }) do
     local v = opts[k]
@@ -530,7 +544,8 @@ M.wrap_spawn_stdio = function(opts)
       M.check_upvalue(v, "opts." .. k)
     end
   end
-  local cmd_str = ("%s -u NONE -l %s %s"):format(
+  local cmd_str = ("%s%s -u NONE -l %s %s"):format(
+    nvim_runtime,
     libuv.shellescape(is_win and vim.fs.normalize(nvim_bin) or nvim_bin),
     libuv.shellescape(vim.fn.fnamemodify(is_win and vim.fs.normalize(__FILE__) or __FILE__, ":h") ..
       "/spawn.lua"),

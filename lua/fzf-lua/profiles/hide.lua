@@ -25,7 +25,7 @@ return {
       opts.actions = opts.actions or {}
       assert(opts.keymap)
       assert(opts.keymap.builtin)
-      if fzf.utils.has(opts, "sk") then
+      if fzf.utils.has(opts, "sk") and not fzf.utils.has(opts, "sk", { 1, 5, 3 }) then
         -- `execute-silent` actions are bugged with skim
         -- Set esc to hide since we aren't using the custom callback
         opts.actions["esc"] = false
@@ -92,16 +92,6 @@ return {
         end
         opts.actions[k] = act
       end
-      -- Hijack the resize event to reload buffer/tab list on unhide
-      FzfLua.win.on_SIGWINCH(opts, "win.unhide", function()
-        if type(opts._contents) == "string"
-            and (opts._resume_reload == true
-              ---@diagnostic disable-next-line: need-check-nil
-              or type(opts._resume_reload) == "function" and opts._resume_reload(opts))
-        then
-          return string.format("reload:%s", opts._contents)
-        end
-      end)
       return opts
     end,
   },

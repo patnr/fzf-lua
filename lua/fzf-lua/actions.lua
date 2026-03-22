@@ -52,7 +52,7 @@ M.expect = function(actions, opts)
       elseif k ~= "enter" then
         -- Skim does not support case sensitive alt-shift binds
         -- which are supported with fzf since version 0.25
-        if not opts._is_skim or not k:match("^alt%-%u") then
+        if not utils.has(opts, "sk") or not k:match("^alt%-%u") then
           table.insert(expect, k)
         end
       end
@@ -150,29 +150,27 @@ M.resume = function(_, _)
   require("fzf-lua").resume()
 end
 
-local edit_entry = function(entry, fullpath, will_replace_curbuf, opts)
+---requested buffer already loaded in the current window (split?)
+---@param buf? integer
+---@param fullpath string
+---@return boolean
+local buf_edited = function(buf, fullpath)
   local curbuf = vim.api.nvim_win_get_buf(0)
-  local curbname = vim.api.nvim_buf_get_name(curbuf)
-  if entry.bufnr == curbuf or path.equals(curbname, fullpath) then
-    -- requested buffer already loaded in the current window (split?)
-    return true
-  end
-  local bufnr = entry.bufnr or (function()
-    -- Always open files relative to the current win/tab cwd (#1854)
-    -- We normalize the path or Windows will fail with directories starting
-    -- with special characters, for example "C:\app\(web)" will be translated
-    -- by neovim to "c:\app(web)" (#1082)
-    local relpath = path.normalize(path.relative_to(fullpath, utils.cwd()))
-    local bufnr0 = vim.fn.bufadd(relpath)
-    if bufnr0 == 0 and not opts.silent then
-      utils.warn("Unable to add buffer %s", relpath)
-      return
-    end
-    vim.bo[bufnr0].buflisted = true
-    return bufnr0
-  end)()
-  -- abort if we're unable to load the buffer
-  if not tonumber(bufnr) then return end
+  return buf == curbuf or path.equals(fullpath, vim.api.nvim_buf_get_name(curbuf))
+end
+
+---@param relpath string
+---@return integer?
+local load_buf = function(relpath)
+  local bufnr = vim.fn.bufadd(relpath)
+  if bufnr == 0 then return end
+  return bufnr
+end
+
+---@param bufnr integer
+---@param will_replace_curbuf boolean
+---@return boolean? success
+local set_buf = function(bufnr, will_replace_curbuf)
   -- wipe unnamed empty buffers (e.g. "new") on switch
   if will_replace_curbuf
       and vim.bo.buftype == ""
@@ -192,6 +190,7 @@ local edit_entry = function(entry, fullpath, will_replace_curbuf, opts)
   -- user cancelles the save dialog pcall will fail with:
   -- Vim:E37: No write since last change (add ! to override)
   if not ok then return end
+  vim.bo[bufnr].buflisted = true
   return true
 end
 
@@ -223,17 +222,13 @@ M.vimcmd_entry = function(vimcmd, selected, opts, bufedit)
       if not utils.is_term_buffer(0) then
         vim.cmd("normal! m`")
       end
+      -- Always open files relative to the current win/tab cwd (#1854)
+      -- We normalize the path or Windows will fail with directories starting
+      -- with special characters, for example "C:\app\(web)" will be translated
+      -- by neovim to "c:\app(web)" (#1082)
+      local relpath = path.normalize(path.relative_to(fullpath, utils.cwd()))
       if bufedit then
-        local will_replace_curbuf = (function()
-          if #vimcmd > 0 then return false end
-          local curbuf = vim.api.nvim_win_get_buf(0)
-          local curbname = vim.api.nvim_buf_get_name(curbuf)
-          if entry.bufnr == curbuf or path.equals(curbname, fullpath) then
-            -- requested buffer already loaded in the current window (split?)
-            return false
-          end
-          return true
-        end)()
+        local will_replace_curbuf = #vimcmd == 0 and not buf_edited(entry.bufnr, fullpath)
         if will_replace_curbuf then
           if utils.wo.winfixbuf then
             utils.warn("'winfixbuf' is set for current window, will open in a split.")
@@ -242,18 +237,23 @@ M.vimcmd_entry = function(vimcmd, selected, opts, bufedit)
               and not vim.o.confirm
               and not vim.o.autowriteall
               and utils.buffer_is_dirty(vim.api.nvim_get_current_buf(), true, true) then
+            if not opts.silent then utils.warn("cannot replace modified buffer") end
             return
           end
         end
         if #vimcmd > 0 then vim.cmd(vimcmd) end
         -- NOTE: URI entries only execute new buffers (new|vnew|tabnew)
         -- and later use `utils.jump_to_location` to load the buffer
-        if not entry.uri and not edit_entry(entry, fullpath, will_replace_curbuf, opts) then
+        if not entry.uri and not buf_edited(entry.bufnr, fullpath) then
           -- error loading buffer or save dialog cancelled
-          return
+          local bufnr = entry.bufnr or load_buf(relpath)
+          if not bufnr then
+            if not opts.silent then utils.warn("Unable to add buffer %s", fullpath) end
+            return
+          end
+          if not set_buf(bufnr, will_replace_curbuf) then return end
         end
       else
-        local relpath = path.normalize(path.relative_to(fullpath, utils.cwd()))
         vim.cmd(("%s %s"):format(vimcmd, relpath))
       end
       -- Reload actions from fzf's (buf/arg del, etc) window end here
@@ -314,7 +314,8 @@ local sel_to_qf = function(selected, opts, is_loclist)
     table.insert(qf_list, {
       bufnr = file.bufnr,
       filename = file.bufname or file.path or file.uri,
-      lnum = file.line > 0 and file.line or 1,
+      lnum = file.line or 0,
+      valid = 1,
       col = file.col,
       text = text,
     })
@@ -586,6 +587,31 @@ end
 M.search_cr = function(selected, opts)
   M.search(selected, opts)
   utils.feed_keys_termcodes("<CR>")
+end
+
+---@param kind ":"|"/"
+---@param selected string[]
+---@param opts fzf-lua.config.CommandHistory|{}
+local hist_del = function(kind, selected, opts)
+  if not vim.iter then return end
+  local iter = opts.reverse_list and vim.iter(selected) or vim.iter(selected):rev()
+  iter:each(function(e)
+    local idx = assert(utils.tointeger(opts.reverse_list and e or -e - 1))
+    local entry = vim.fn.histget(":", idx) -- get before deleted
+    local res = vim.fn.histdel(kind, idx)
+    local info = res == 1 and "deleted" or "fail to delete"
+    local notify = res == 1 and utils.info or utils.warn
+    notify("%s: %s", info, entry)
+  end)
+  vim.cmd("wshada!")
+end
+
+M.ex_del = function(...)
+  hist_del(":", ...)
+end
+
+M.search_del = function(...)
+  hist_del("/", ...)
 end
 
 M.goto_mark = function(selected)
@@ -906,7 +932,7 @@ M.git_branch_del = function(selected, opts)
     utils.warn("Cannot delete active branch '%s'", branch)
     return
   end
-  if vim.fn.confirm("Delete branch " .. branch .. "?", "&Yes\n&No") == 1 then
+  if utils.confirm("Delete branch " .. branch .. "?", "&Yes\n&No") == 1 then
     table.insert(cmd_del_branch, branch)
     local output, rc = utils.io_systemlist(cmd_del_branch)
     if rc ~= 0 then
@@ -973,7 +999,7 @@ M.git_worktree_del = function(selected, opts)
     utils.warn("Cannot delete current worktree '%s'", worktree_path)
     return
   end
-  if vim.fn.confirm("Delete worktree " .. worktree_path .. "?", "&Yes\n&No") == 1 then
+  if utils.confirm("Delete worktree " .. worktree_path .. "?", "&Yes\n&No") == 1 then
     local cmd_del = path.git_cwd({ "git", "worktree", "remove", worktree_path }, opts) ---@type string[]
     local output, rc = utils.io_systemlist(cmd_del)
     if rc ~= 0 then
@@ -1020,7 +1046,7 @@ M.git_checkout = function(selected, opts)
   local commit_hash = match_commit_hash(selected[1], opts)
   local current_commit = utils.io_systemlist(cmd_cur_commit)[1]
   if commit_hash == current_commit then return end
-  if vim.fn.confirm("Checkout commit " .. commit_hash .. "?", "&Yes\n&No") == 1 then
+  if utils.confirm("Checkout commit " .. commit_hash .. "?", "&Yes\n&No") == 1 then
     local cmd_checkout = path.git_cwd({ "git", "checkout" }, opts)
     table.insert(cmd_checkout, commit_hash)
     local output, rc = utils.io_systemlist(cmd_checkout)
@@ -1078,7 +1104,7 @@ M.git_stage_unstage = function(selected, opts)
 end
 
 M.git_reset = function(selected, opts)
-  if vim.fn.confirm("Reset " .. #selected .. " file(s)?", "&Yes\n&No") == 1 then
+  if utils.confirm("Reset " .. #selected .. " file(s)?", "&Yes\n&No") == 1 then
     for _, s in ipairs(selected) do
       s = utils.strip_ansi_coloring(s)
       local is_untracked = s:sub(5, 5) == "?"
@@ -1093,14 +1119,14 @@ M.git_reset = function(selected, opts)
 end
 
 M.git_stash_drop = function(selected, opts)
-  if vim.fn.confirm("Drop " .. #selected .. " stash(es)?", "&Yes\n&No") == 1 then
+  if utils.confirm("Drop " .. #selected .. " stash(es)?", "&Yes\n&No") == 1 then
     local cmd = path.git_cwd({ "git", "stash", "drop" }, opts)
     git_exec(selected, opts, cmd)
   end
 end
 
 M.git_stash_pop = function(selected, opts)
-  if vim.fn.confirm("Pop " .. #selected .. " stash(es)?", "&Yes\n&No") == 1 then
+  if utils.confirm("Pop " .. #selected .. " stash(es)?", "&Yes\n&No") == 1 then
     local cmd = path.git_cwd({ "git", "stash", "pop" }, opts)
     git_exec(selected, opts, cmd)
     -- trigger autoread or warn the users buffer(s) was changed
@@ -1109,7 +1135,7 @@ M.git_stash_pop = function(selected, opts)
 end
 
 M.git_stash_apply = function(selected, opts)
-  if vim.fn.confirm("Apply " .. #selected .. " stash(es)?", "&Yes\n&No") == 1 then
+  if utils.confirm("Apply " .. #selected .. " stash(es)?", "&Yes\n&No") == 1 then
     local cmd = path.git_cwd({ "git", "stash", "apply" }, opts)
     git_exec(selected, opts, cmd)
     -- trigger autoread or warn the users buffer(s) was changed
@@ -1339,13 +1365,16 @@ local parse_entry = function(e) return e and e:match("%((.-)%)") or nil end
 M.serverlist_kill = function(sel)
   vim.iter(sel):map(parse_entry):each(function(addr)
     local ok, err = utils.rpcexec(addr, "nvim_exec2", "qa!", {})
-    assert(ok or tostring(err):match("Invalid channel"), err)
+    assert(ok
+      or tostring(err):match("Invalid channel")
+      or tostring(err):match("ch %d+ was closed by the peer"),
+      err)
   end)
 end
 
 M.serverlist_spawn = function()
   libuv.uv_spawn(
-    vim.fn.exepath("nvim"), { args = { "--headless" }, env = { NVIM = "" } })
+    vim.fn.exepath("nvim"), { args = { "--headless" }, env = { NVIM = "" }, detached = true })
 end
 
 M.serverlist_connect = function(sel)

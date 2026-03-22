@@ -109,14 +109,14 @@ M.commands = function(opts)
   return core.fzf_exec(entries, opts)
 end
 
----@param opts table
+---@param opts fzf-lua.config.CommandHistory
 ---@param str ":"|"/"
 local history = function(opts, str)
   local histnr          = vim.fn.histnr(str)
   local dr              = opts.reverse_list and 1 or -1
   local bulk            = 500
   local from, to, delta = dr, dr * histnr, dr * bulk
-  local content         = coroutine.wrap(function(cb)
+  local content         = function(cb)
     local co = coroutine.running()
     for i = from, to, delta do
       vim.schedule(function()
@@ -136,8 +136,8 @@ local history = function(opts, str)
       coroutine.yield()
     end
     cb(nil)
-  end)
-  core.fzf_exec(content, opts)
+  end
+  core.fzf_exec(function(cb) coroutine.wrap(content)(cb) end, opts)
 end
 
 ---@param opts fzf-lua.config.CommandHistory|{}?
@@ -786,43 +786,29 @@ M.serverlist = function(opts)
     local socket_paths = vim.fs.find(function(name, _)
       return name:match("nvim.*")
     end, { path = root, type = "socket", limit = math.huge })
-
-    local found = {} ---@type string[]
-    for _, socket in ipairs(socket_paths) do
-      -- Don't list servers twice
-      if not vim.list_contains(listed, socket) then
-        local ok, chan = pcall(vim.fn.sockconnect, "pipe", socket, { rpc = true })
-        if ok and chan then ---@cast chan integer
-          -- Check that the server is responding
-          if vim.fn.rpcrequest(chan, "nvim_get_chan_info", 0).id then
-            table.insert(found, socket)
-          end
-          vim.fn.chanclose(chan)
-        end
-      end
+    local found = utils.list_to_map(listed or vim.fn.serverlist())
+    local filter = function(socket)
+      if found[socket] or socket:match("fzf%-lua") then return false end
+      found[socket] = true
+      local ok, info = utils.rpcexec(socket, "nvim_get_chan_info", 0)
+      return ok and info.id
     end
-    return found
+    return vim.iter(socket_paths):filter(filter)
   end
 
   opts = require("fzf-lua.config").normalize_opts(opts or {}, "serverlist")
-  local list = vim.fn.serverlist()
+
   local f = function(cb)
-    vim
-        .iter(serverlist(list))
-        :filter(
-          function(p)
-            return not p:match("fzf%-lua") and not vim.tbl_contains(list, p)
-          end
-        )
-        :map(function(p)
-          ---@type boolean, string?
-          local ok, cwd = utils.rpcexec(p, "nvim_exec_lua", "return vim.uv.cwd()", {})
-          if not ok or not cwd then return end
-          cwd = FzfLua.path.normalize(cwd)
-          return ("%s (%s)"):format(cwd, p)
-        end)
-        :each(cb)
+    serverlist():each(function(p) ---@type boolean, string?
+      local ok, cwd = utils.rpcexec(p, "nvim_exec_lua", "return vim.uv.cwd()", {})
+      if not ok or not cwd then return end
+      cwd = FzfLua.path.normalize(cwd)
+      cb(("%s (%s)"):format(cwd, p))
+    end)
     cb(nil)
+  end
+  if utils.has(opts, "sk", "3.0.0") then
+    opts = vim.tbl_deep_extend("force", opts, { winopts = { preview = { pty = true } } })
   end
   core.fzf_exec(function(cb)
     vim.defer_fn(function() f(cb) end, 50) -- wait for spawn/remote_exec?
